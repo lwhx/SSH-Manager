@@ -7,15 +7,14 @@
     "check": "tsc --noEmit",
     "build:web": "vite build --config apps/console/vite.config.ts",
     "dev:web": "vite --config apps/console/vite.config.ts",
-    "deploy:gateway": "wrangler deploy --config wrangler.gateway.jsonc",
-    "deploy:control": "wrangler deploy --config wrangler.control.jsonc",
-    "db:migrate:local": "wrangler d1 migrations apply ssh-manager --config wrangler.control.jsonc --local",
-    "db:migrate:remote": "wrangler d1 migrations apply ssh-manager --config wrangler.control.jsonc --remote",
+    "db:migrate:local": "wrangler d1 migrations apply ssh-manager-staging --config wrangler.single.staging.local.jsonc --local",
+    "db:migrate:remote": "wrangler d1 migrations apply ssh-manager-staging --config wrangler.single.staging.local.jsonc --remote",
     "test:agent": "cd agent && go test ./...",
     "test": "vitest run",
     "cf:quick": "node scripts/cloudflare_quick_deploy.mjs",
     "cf:quick:dry": "node scripts/cloudflare_quick_deploy.mjs --dry-run",
-    "test:cf:quick": "node --test scripts/test_cloudflare_quick_deploy.mjs"
+    "test:cf:quick": "node --test scripts/test_cloudflare_quick_deploy.mjs",
+    "deploy:single": "wrangler deploy --config wrangler.single.staging.local.jsonc"
   },
   "dependencies": {
     "jose": "^6.1.0",

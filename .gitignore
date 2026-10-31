@@ -12,3 +12,4 @@ wrangler.control.staging.local.jsonc
 wrangler.gateway.staging.local.jsonc
 .staging-evidence/
 .ssh-manager-deploy/
+wrangler.single.staging.local.jsonc

@@ -10,7 +10,7 @@ import {fileURLToPath} from "node:url";
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
 const wrangler=path.join(root,"node_modules",".bin","wrangler");
-const repoConfig=path.join(root,"wrangler.gateway.jsonc");
+const repoConfig=path.join(root,"wrangler.single.staging.example.jsonc");
 const state=fs.mkdtempSync(path.join(os.tmpdir(),"ssh-manager-d1-ci-"));
 const configFile=path.join(root,".staging-local-"+process.pid+".jsonc");
 const seedFile=path.join(state,"seed.sql");
@@ -132,7 +132,15 @@ async function main(){
  const devicePublic=toURL(await webcrypto.subtle.exportKey("raw",device.publicKey));
  const rootPublic=toURL(await webcrypto.subtle.exportKey("raw",rootKey.publicKey));
  const cfg=JSON.parse(fs.readFileSync(repoConfig,"utf8"));
- cfg.name="ssh-manager-gateway-local-contract";
+ cfg.name="ssh-manager-single-local-contract";
+ // Test with Agent host = loopback; remove Custom Domain routes and static
+ // assets in the fixture only. Cloudflare production always uses both.
+ delete cfg.routes;
+ delete cfg.assets;
+ cfg.workers_dev=true;
+ cfg.vars.CONTROL_HOSTNAME="console.local.invalid";
+ cfg.vars.AGENT_HOSTNAME="127.0.0.1";
+ cfg.d1_databases[0].database_name="ssh-manager";
  cfg.d1_databases[0].database_id="00000000-0000-4000-8000-000000000001";
  cfg.d1_databases[0].remote=false;
  cfg.vars.COMMAND_PUBLIC_KEY=devicePublic;
@@ -150,6 +158,16 @@ async function main(){
   stream.on("data",b=>{workerLog=(workerLog+b.toString()).slice(-12000)});
  }
  await ready();
+ // Same Worker must reject admin API and assets through unprotected Agent hostname.
+ let boundary=await fetch(host+"/api/v1/health");
+ assert.equal(boundary.status,404,"Management API leaked through Agent host");
+ boundary=await fetch(host+"/");
+ assert.equal(boundary.status,404,"SPA leaked through Agent host");
+ boundary=await fetch(host+"/index.html");
+ assert.equal(boundary.status,404,"Static asset leaked through Agent host");
+ boundary=await fetch(host+"/agent/v1/health");
+ assert.equal(boundary.status,200,"Agent hostname failed to route");
+ assert.equal((await boundary.json()).agent_auth,"device-ed25519");
  // Raw unsigned HTTP, even with a valid device ID, can never mutate D1.
  let res=await fetch(host+"/agent/v1/report",{method:"POST",
   headers:{"Content-Type":"application/json"},
