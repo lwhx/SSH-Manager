@@ -33,6 +33,7 @@ type JournalMessage struct {
  Exe string `json:"_EXE"`
  UID string `json:"_UID"`
  PID string `json:"_PID"`
+ Transport string `json:"_TRANSPORT"`
  TimeUS string `json:"__REALTIME_TIMESTAMP"`
 }
 
@@ -68,6 +69,13 @@ func ParseTrustedJournal(line []byte)(Event,error){
  if len(line)==0||len(line)>32768{return result,errors.New("unacceptable journald record size")}
  var record JournalMessage
  if err:=json.Unmarshal(line,&record);err!=nil{return result,err}
+ // systemd documents that _PID on stdout/stderr streams may be that of
+ // the parent which opened the journald stream, not the child which logged.
+ // Using that PID could confuse two SSH sessions under one sshd master.
+ // Only datagram/native-journal transports retain strict sender provenance.
+ if record.Transport!="syslog"&&record.Transport!="journal"{
+  return result,errors.New("unsafe SSH authentication journal transport")
+ }
  if !trustedSSHDExecutable(record.Exe)||record.UID!="0"{
   return result,errors.New("journal record lacks trusted SSH daemon and UID provenance")
  }

@@ -12,7 +12,7 @@ const acceptedMessage="Accepted publickey for root from 203.0.113.9 port 52133 s
 func TestTrustedJournalAndMatching(t *testing.T){
  started:=time.Unix(1793440000,0)
  data,_:=json.Marshal(map[string]string{
-  "MESSAGE":acceptedMessage,"_EXE":"/usr/sbin/sshd","_UID":"0","_PID":"1548",
+  "MESSAGE":acceptedMessage,"_EXE":"/usr/sbin/sshd","_UID":"0","_PID":"1548","_TRANSPORT":"syslog","_TRANSPORT":"syslog",
   "__REALTIME_TIMESTAMP":fmt.Sprint(started.Add(time.Second*7).UnixMicro()),
  })
  got,err:=ParseTrustedJournal(data)
@@ -29,6 +29,9 @@ func TestRejectsSpoofedOrIncompleteJournal(t *testing.T){
  }
  for name,patch:=range map[string]func(map[string]string){
   "fake executable":func(m map[string]string){m["_EXE"]="/usr/bin/logger"},
+  "stdout parent PID":func(m map[string]string){m["_TRANSPORT"]="stdout"},
+  "kernel transport":func(m map[string]string){m["_TRANSPORT"]="kernel"},
+  "missing transport":func(m map[string]string){delete(m,"_TRANSPORT")},
   "wrong uid":func(m map[string]string){m["_UID"]="1000"},
   "missing pid":func(m map[string]string){delete(m,"_PID")},
   "no log time":func(m map[string]string){delete(m,"__REALTIME_TIMESTAMP")},
@@ -74,5 +77,16 @@ func TestIPv6AndHostileLogText(t *testing.T){
   acceptedMessage+"\n"+acceptedMessage,
   "Accepted publickey for invalid user root from 203.0.113.9 port 52133 ssh2: ED25519 "+fingerprint}{
   if _,err:=ParseMessage(value);err==nil{t.Fatalf("accepted invalid authentication log: %q",value)}
+ }
+}
+
+func TestNativeJournalTransportAcceptedWithoutStdoutFallback(t *testing.T){
+ now:=time.Unix(1793440000,0)
+ for _,transport:=range []string{"syslog","journal"}{
+  raw,_:=json.Marshal(map[string]string{
+   "MESSAGE":acceptedMessage,"_EXE":"/usr/sbin/sshd","_UID":"0",
+   "_PID":"1548","_TRANSPORT":transport,"__REALTIME_TIMESTAMP":fmt.Sprint(now.UnixMicro()),
+  })
+  if _,err:=ParseTrustedJournal(raw);err!=nil{t.Fatalf("%s rejected: %v",transport,err)}
  }
 }

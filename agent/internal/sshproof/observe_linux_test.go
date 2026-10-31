@@ -13,7 +13,7 @@ import (
 func testJournalAuth(t *testing.T,msg string,uid string,pid string,at time.Time)[]byte{
  t.Helper()
  data,err:=json.Marshal(map[string]string{
-  "MESSAGE":msg,"_EXE":"/usr/sbin/sshd","_UID":uid,
+  "MESSAGE":msg,"_EXE":"/usr/sbin/sshd","_UID":uid,"_TRANSPORT":"syslog",
   "_PID":pid,"__REALTIME_TIMESTAMP":fmt.Sprint(at.UnixMicro()),
  })
  if err!=nil{t.Fatal(err)}

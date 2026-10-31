@@ -19,11 +19,14 @@ class StagingPreflightTests(unittest.TestCase):
         fingerprint = "WqyC1TNJwaA73QFZwyV9a7G2SpMUEMDwVZ7OEWHsMmg"
         message = ("Accepted publickey for root from 203.0.113.9 "
                    "port 54321 ssh2: ED25519 SHA256:" + fingerprint)
-        valid = {"_EXE": "/usr/sbin/sshd", "_UID": "0", "_PID": "123",
+        valid = {"_EXE": "/usr/sbin/sshd", "_UID": "0", "_PID": "123", "_TRANSPORT": "syslog",
                  "MESSAGE": message}
         self.assertTrue(module.has_trusted_ssh_auth(json.dumps(valid)))
+        self.assertFalse(module.has_trusted_ssh_auth(json.dumps({k:v for k,v in valid.items() if k!="_TRANSPORT"})))
         for change in (
             {"_EXE": "/usr/bin/logger"},
+            {"_TRANSPORT": "stdout"},
+            {"_TRANSPORT": "kernel"},
             {"_UID": "1000"},
             {"_PID": "-1"},
             {"MESSAGE": message + " injected"},

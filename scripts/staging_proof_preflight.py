@@ -98,7 +98,8 @@ def has_trusted_ssh_auth(records: str) -> bool:
         if not isinstance(item, dict):
             continue
         if not (
-            item.get("_EXE") in SSHD_EXECUTABLES
+            item.get("_TRANSPORT") in {"syslog", "journal"}
+            and item.get("_EXE") in SSHD_EXECUTABLES
             and item.get("_UID") == "0"
             and str(item.get("_PID", "")).isdigit()
             and int(item["_PID"]) > 1

@@ -31,7 +31,7 @@
 - `/etc/ssh-manager/helper.json` 保持 `root:root`、0600；在隔离 VPS 里显式将 `enable_ssh_proof` 设为 true，且日常公钥已经安装时继续保持 `enable_daily_install=false`。
 - Helper 证明 Socket 为 `/run/ssh-manager-proof/proof.sock`，目录 0711、Socket 0660 归 Root 与目标 Linux 用户 GID，Helper 仍以 SO_PEERCRED 检查确切 UID 与进程祖先。
 - Agent 继续使用普通 `ssh-manager` 账户，只能从本地受限控制 Socket 获取 Root 已签名证明，再通过现有 HTTPS Device Auth 向 Cloudflare 上报。
-- OpenSSH 的 journald 记录必须带可信 `_EXE`、`_UID`、`_PID` 等字段；若系统只有普通 auth.log 文本、OpenSSH PID 关系不匹配或权限不足，证明必须失败，不得人工强行通过。
+- OpenSSH 的 journald 记录必须带可信 `_EXE`、`_UID`、`_PID`，且 `_TRANSPORT` 为 `syslog` 或 `journal`。**拒绝 `stdout`/`stderr` 记录**：systemd 官方说明它们的 `_PID` 可能代表打开日志流的父进程，容易混淆不同 SSH 会话。参考 https://www.freedesktop.org/software/systemd/man/latest/systemd.journal-fields.html 。若只有普通 auth.log、stdout 日志或 PID 关系不匹配，验证必须失败，不得人工强行通过。
 - 应完整应用 D1 迁移，包含 `0005_pinned_node_proof_keys.sql`，再进行此测试。
 
 ## 四、Windows PowerShell 新建 SSH 验证连接示例

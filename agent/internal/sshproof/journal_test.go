@@ -11,7 +11,7 @@ import (
 func journalEvent(t *testing.T,log string,exe string,stamp time.Time)[]byte{
  t.Helper()
  r:=map[string]string{
-  "MESSAGE":log,"_EXE":exe,"_UID":"0","_PID":"2145",
+  "MESSAGE":log,"_EXE":exe,"_UID":"0","_PID":"2145","_TRANSPORT":"syslog",
   "__REALTIME_TIMESTAMP":fmt.Sprint(stamp.UnixMicro()),
  }
  b,err:=json.Marshal(r)
