@@ -43,6 +43,10 @@ case "$ID" in debian|ubuntu) ;; *) fail "Only Debian and Ubuntu Staging are supp
 [[ "$REV" =~ ^[a-f0-9]{40}$ ]] || fail "A pinned 40-character Git commit is required"
 [ -r /dev/tty ] || fail "An interactive terminal is required to enter the token safely"
 
+# sudo may omit /usr/local/go/bin from PATH even when Go is installed.
+if ! command -v go >/dev/null 2>&1 && [ -x /usr/local/go/bin/go ]; then
+  export PATH="/usr/local/go/bin:$PATH"
+fi
 for cmd in curl tar go install systemctl useradd groupadd getent; do
   command -v "$cmd" >/dev/null 2>&1 || fail "Missing prerequisite: $cmd"
 done

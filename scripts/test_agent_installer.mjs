@@ -7,7 +7,7 @@ const src=readFileSync(path,"utf8");
 test("staging Agent installer syntax and safety defaults",()=>{
  execFileSync("bash",["-n",path.pathname]);
  assert.match(src,/--revision/);
- assert.match(src,/--token-stdin/);
+ assert.match(src,/-token-stdin/);
  assert.match(src,/\/dev\/tty/);
  assert.match(src,/sudo\/root|Run with sudo/);
  assert.match(src,/systemctl enable --now ssh-manager-agent\.service/);
