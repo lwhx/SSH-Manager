@@ -16,7 +16,7 @@ describe("SSH public key parser",()=>{
   const blob=keyBlob(),txt="ssh-ed25519 "+toBase64(blob)+" workstation";
   const result=await parsePublicKey(txt);
   expect(result.normalized).toBe(txt);
-  const hash=new Uint8Array(await crypto.subtle.digest("SHA-256",blob));
+  const hash=new Uint8Array(await crypto.subtle.digest("SHA-256",Uint8Array.from(blob)));
   expect(result.fingerprint).toBe("SHA256:"+toBase64(hash).replace(/=+$/,""));
  });
  it("rejects invalid, short, or unsupported keys",async()=>{
