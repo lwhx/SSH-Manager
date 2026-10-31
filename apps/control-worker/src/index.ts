@@ -1,6 +1,6 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
-import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,signCommand} from "../../../packages/protocol/src/index";
+import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
 interface Env {
   DB:D1Database; NODE_SESSIONS:DurableObjectNamespace; ASSETS:Fetcher;
