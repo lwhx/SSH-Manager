@@ -31,6 +31,20 @@ export function customDomain(input){
  }
  return h;
 }
+// One prompt instead of two: ssh.whks.de -> agent.whks.de,
+// ssh-staging.whks.de -> agent-staging.whks.de.
+// Expert users can still override SSH_MANAGER_AGENT_HOSTNAME.
+export function deriveAgentHostname(controlHostname){
+ const control=customDomain(controlHostname);
+ const labels=control.split(".");
+ if(labels.length<3)throw Error("CONTROL_HOSTNAME_NEEDS_SUBDOMAIN");
+ let prefix="agent";
+ if(labels[0].includes("staging"))prefix="agent-staging";
+ if(labels[0].includes("test")&&!labels[0].includes("staging"))prefix="agent-test";
+ const agent=customDomain([prefix,...labels.slice(1)].join("."));
+ if(agent===control)throw Error("Control and Agent hostnames cannot match");
+ return agent;
+}
 export function generateCommandSigner(){
  const {privateKey,publicKey}=generateKeyPairSync("ed25519");
  const key=publicKey.export({format:"jwk"});

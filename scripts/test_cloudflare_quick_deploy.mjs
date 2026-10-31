@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {createPrivateKey,createPublicKey,sign,verify} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {
- accessSettings,customDomain,findStagingDatabase,generateCommandSigner,
+ accessSettings,customDomain,deriveAgentHostname,findStagingDatabase,generateCommandSigner,
  buildSingleConfig,validateStoredConfig
 } from "./cloudflare_quick_lib.mjs";
 const template=JSON.parse(readFileSync(new URL("../wrangler.single.staging.example.jsonc",import.meta.url),"utf8"));
@@ -86,4 +86,12 @@ test("fails closed on domain, D1, key, Access and opt-in drift",()=>{
   const {cfg,state}=fixture();mutate(cfg);
   assert.throws(()=>validateStoredConfig(cfg,state));
  }
+});
+
+test("derive safe Agent hostname from one Control hostname",()=>{
+ assert.equal(deriveAgentHostname("ssh.whks.de"),"agent.whks.de");
+ assert.equal(deriveAgentHostname("ssh-staging.whks.de"),"agent-staging.whks.de");
+ assert.equal(deriveAgentHostname("console-test.example.net"),"agent-test.example.net");
+ assert.throws(()=>deriveAgentHostname("agent.example.net"));
+ assert.throws(()=>deriveAgentHostname("example.net"));
 });
