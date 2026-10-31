@@ -58,6 +58,18 @@ npm run build:web
 cd agent && go test ./...
 ```
 
+### Cloudflare 快捷部署（Staging）
+
+先在 Cloudflare Zero Trust 创建 Control 的 Access Application，配置 GitHub/Cloudflare 登录、Owner Allow 规则，取得 Team Domain 和 AUD。
+
+```bash
+npm ci
+npx wrangler login
+npm run cf:quick
+```
+
+首次创建/复用测试 D1，生成并上传 Ed25519 控制命令密钥，迁移数据库，并依序部署 Gateway 和 Control。以后运行同一命令保留原数据库与密钥。所有高危 SSH 修改默认锁定。详见 [Cloudflare 快捷部署指南](docs/CLOUDFLARE_QUICK_DEPLOY.md)。
+
 ### Cloudflare 安装概览
 
 1. 创建一套 D1 数据库，分别在 `wrangler.control.jsonc` 和 `wrangler.gateway.jsonc` 填入真实 database_id。

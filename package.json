@@ -12,7 +12,10 @@
     "db:migrate:local": "wrangler d1 migrations apply ssh-manager --config wrangler.control.jsonc --local",
     "db:migrate:remote": "wrangler d1 migrations apply ssh-manager --config wrangler.control.jsonc --remote",
     "test:agent": "cd agent && go test ./...",
-    "test": "vitest run"
+    "test": "vitest run",
+    "cf:quick": "node scripts/cloudflare_quick_deploy.mjs",
+    "cf:quick:dry": "node scripts/cloudflare_quick_deploy.mjs --dry-run",
+    "test:cf:quick": "node --test scripts/test_cloudflare_quick_deploy.mjs"
   },
   "dependencies": {
     "jose": "^6.1.0",

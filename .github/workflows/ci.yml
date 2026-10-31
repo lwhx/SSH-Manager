@@ -31,5 +31,7 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p test_staging_readiness.py
       - run: python3 -m unittest discover -s scripts -p test_staging_remote_probe.py
       - run: npm run test
+      - run: npm run test:cf:quick
+      - run: npm run cf:quick:dry
       - run: node scripts/test_gateway_workerd.mjs --local-only
       - run: npm run build:web

@@ -10,7 +10,7 @@ export function accessSettings(input){
  const team=String(input.team||"").trim().replace(/^https:\/\//i,"").replace(/\/$/,"").toLowerCase();
  const aud=String(input.aud||"").trim();
  const owner=String(input.owner||"").trim().toLowerCase();
- if(!TEAM.test(team))throw Error("ACCESS_TEAM_DOMAIN_INVALID: expected team.cloudflareaccess.com");
+ if(!TEAM.test(team)||team==="replace.cloudflareaccess.com"||team==="example.cloudflareaccess.com"){throw Error("ACCESS_TEAM_DOMAIN_INVALID: expected your real team.cloudflareaccess.com");}
  if(!AUD.test(aud)||aud.startsWith("REPLACE"))throw Error("ACCESS_AUD_INVALID: use the actual Access application AUD");
  if(!EMAIL.test(owner)||owner==="owner@example.com")throw Error("OWNER_EMAIL_INVALID");
  return {team,aud,owner};
