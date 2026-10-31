@@ -120,11 +120,11 @@ func(h *Handler)ProveSession(ctx context.Context,peerPID,peerUID int,request Pro
   KeyFingerprint:prepared.Fingerprint,IssuedAt:time.Unix(from,0),
   ExpiresAt:time.Unix(prepared.ExpiresAt,0)}
  if !challenge.IssuedAt.Before(challenge.ExpiresAt){return fail("PROOF_WINDOW_CLOSED")}
- event,err:=sshproof.ObserveLinuxSSHLogin(ctx,peerPID,challenge,sshproof.ReadLinuxProcess)
+ event,err:=h.ObserveSSH(ctx,peerPID,challenge,h.ProcessReader)
  if err!=nil{return fail("TRUSTED_SSH_LOGIN_NOT_OBSERVED")}
  challenge.ClientIP=event.ClientIP;challenge.ClientPort=event.ClientPort
  if err=sshproof.VerifyLocalSSHProof(sshproof.TrustedPeer{PID:peerPID,RealUID:peerUID},
-  uid,request.Nonce,prepared.NonceHash,challenge,event,sshproof.ReadLinuxProcess);err!=nil{
+  uid,request.Nonce,prepared.NonceHash,challenge,event,h.ProcessReader);err!=nil{
   return fail("SSH_PROOF_REJECTED")
  }
  random:=make([]byte,16)

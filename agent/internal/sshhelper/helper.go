@@ -21,6 +21,7 @@ import (
 
  "github.com/lwhx/SSH-Manager/agent/internal/sshkeys"
  "github.com/lwhx/SSH-Manager/agent/internal/sshprobe"
+ "github.com/lwhx/SSH-Manager/agent/internal/sshproof"
 )
 
 var uuidRE=regexp.MustCompile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -69,6 +70,7 @@ type PolicyReader func(context.Context,Config)(sshprobe.Effective,error)
 type AccountLookup func(string)(*user.User,error)
 type KeyInstaller func(string,int,int,string,string)(sshkeys.Result,error)
 
+type ObserveSSHFunc func(context.Context,int,sshproof.Challenge,sshproof.ProcessReader)(sshproof.Event,error)
 type Handler struct{
  defaultsOnce sync.Once
  Config Config
@@ -78,6 +80,8 @@ type Handler struct{
  Journal *Journal
  Challenges *ChallengeStore
  ProofSigningKey ed25519.PrivateKey
+ ObserveSSH ObserveSSHFunc
+ ProcessReader sshproof.ProcessReader
  Outbox *Outbox
  Clock func()time.Time
  EUID func()int
@@ -89,6 +93,8 @@ func (h *Handler) defaults(){
   if h.Install==nil{h.Install=sshkeys.InstallDaily}
   if h.Clock==nil{h.Clock=time.Now}
   if h.EUID==nil{h.EUID=os.Geteuid}
+  if h.ObserveSSH==nil{h.ObserveSSH=sshproof.ObserveLinuxSSHLogin}
+  if h.ProcessReader==nil{h.ProcessReader=sshproof.ReadLinuxProcess}
  })
 }
 func (c Config) Validate()error{
