@@ -13,6 +13,18 @@
     "db:migrate:remote": "wrangler d1 migrations apply ssh-manager --config wrangler.control.jsonc --remote",
     "test:agent": "cd agent && go test ./..."
   },
-  "dependencies": {"jose":"^6.1.0","react":"^19.2.0","react-dom":"^19.2.0"},
-  "devDependencies": {"@cloudflare/workers-types":"^4.20260901.0","@types/react":"^19.2.0","@types/react-dom":"^19.2.0","@vitejs/plugin-react":"^5.0.0","typescript":"^5.9.0","vite":"^7.1.0","wrangler":"^4.45.0"}
+  "dependencies": {
+    "jose": "^6.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "*",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0",
+    "wrangler": "^4.45.0"
+  }
 }
