@@ -1,6 +1,6 @@
 import{describe,it,expect}from"vitest";
 import{base64url}from"./index";
-import{verifyPinnedSSHProof,type ProofEvidence,type ExpectedSSHProof}from"./proof";
+import{proofChallengeReadiness,verifyPinnedSSHProof,type ProofEvidence,type ExpectedSSHProof}from"./proof";
 
 const node="10000000-0000-4000-8000-000000000001";
 const verification="20000000-0000-4000-8000-000000000001";
@@ -45,5 +45,19 @@ describe("root-only pinned SSH attestation",()=>{
    const s=await sign(p);
    await expect(verifyPinnedSSHProof(s.payload,s.signature,s.publicKey,expected())).rejects.toThrow();
   }
+ });
+});
+
+describe("SSH challenge preparation races",()=>{
+ it("does not permanently reject a proof before helper preparation report arrives",()=>{
+  const pending={status:"PENDING",expires_at:1300,prepared_at:null};
+  expect(proofChallengeReadiness(pending,1100)).toBe("CHALLENGE_PREPARATION_UNCONFIRMED");
+  expect(proofChallengeReadiness({...pending,prepared_at:1050},1100)).toBe(null);
+ });
+ it("treats expired, cancelled, or missing challenges as terminal",()=>{
+  expect(proofChallengeReadiness({status:"PENDING",expires_at:1000,prepared_at:900},1000)).toBe("CHALLENGE_NOT_ACTIVE");
+  expect(proofChallengeReadiness({status:"INVALIDATED",expires_at:1300,prepared_at:900},1000)).toBe("CHALLENGE_NOT_ACTIVE");
+  expect(proofChallengeReadiness({status:"CANCELLED",expires_at:1300,prepared_at:900},1000)).toBe("CHALLENGE_NOT_ACTIVE");
+  expect(proofChallengeReadiness(null,1000)).toBe("CHALLENGE_NOT_ACTIVE");
  });
 });

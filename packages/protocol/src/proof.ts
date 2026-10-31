@@ -61,3 +61,22 @@ export async function verifyPinnedSSHProof(payload:string,signature:string,
  }
  return parsed as unknown as ProofEvidence;
 }
+
+// A signed proof can reach the Gateway before the independent helper
+// preparation report, e.g. due to temporary network failure. This state
+// MUST NOT be interpreted as a permanently invalid SSH login.
+export type ProofChallengeReadiness =
+ "CHALLENGE_NOT_ACTIVE"|"CHALLENGE_PREPARATION_UNCONFIRMED"|null;
+export function proofChallengeReadiness(
+ challenge:{status:string;expires_at:number;prepared_at:number|null}|null,
+ timestamp:number
+):ProofChallengeReadiness{
+ if(!challenge||challenge.status!=="PENDING"||challenge.expires_at<=timestamp){
+  return "CHALLENGE_NOT_ACTIVE";
+ }
+ if(challenge.prepared_at==null||!Number.isInteger(challenge.prepared_at)||
+  challenge.prepared_at<=0){
+  return "CHALLENGE_PREPARATION_UNCONFIRMED";
+ }
+ return null;
+}

@@ -26,6 +26,7 @@ func TestTransientOrUnknownGatewayResponseDoesNotDiscardProof(t *testing.T){
   {404,"NOT_FOUND"}, // Wrong deployment/route
   {409,"REPLAY"}, // Device request nonce replay
   {409,"INVALID_STATUS_TRANSITION"},
+  {409,"CHALLENGE_PREPARATION_UNCONFIRMED"},
   {409,"ATOMIC_PROOF_TRANSITION_NOT_COMPLETED"},
   {429,"RATE_LIMIT"},
   {500,"INTERNAL_ERROR"},

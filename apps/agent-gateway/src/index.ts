@@ -1,5 +1,5 @@
 import {DurableObject} from "cloudflare:workers";
-import {verifyPinnedSSHProof,verifyPinnedSSHSignature} from "../../../packages/protocol/src/proof";
+import {proofChallengeReadiness,verifyPinnedSSHProof,verifyPinnedSSHSignature} from "../../../packages/protocol/src/proof";
 import {ApiError,errorResponse,response,now,sha256hex,decodeBase64url,validNodeId} from "../../../packages/protocol/src/index";
 interface Env {DB:D1Database;NODE_SESSIONS:DurableObjectNamespace;COMMAND_PUBLIC_KEY:string;}
 function must(v:unknown,code:string,status=400):asserts v{if(!v)throw new ApiError(code,status);}
@@ -107,8 +107,11 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       catch{throw new ApiError("INVALID_ROOT_PROOF_SIGNATURE",403);}
       return response({accepted:true,verification_id:challenge.id,status:"VERIFIED",idempotent:true});
     }
-    must(challenge&&challenge.status==="PENDING"&&challenge.prepared_at!=null&&
-      challenge.expires_at>now(),"CHALLENGE_NOT_ACTIVE",409);
+    // Preparation may still be pending because its separate Agent operation
+    // report is delayed. That is RETRYABLE, unlike cancelled/expired proofs.
+    // Never let an unconfirmed but valid nonce be terminally quarantined.
+    const readiness=proofChallengeReadiness(challenge,now());
+    must(readiness===null,readiness||"CHALLENGE_NOT_ACTIVE",409);
     const node=await env.DB.prepare(
       "SELECT login_user,config_revision,init_stage FROM nodes WHERE id=?"
     ).bind(id).first<any>();
