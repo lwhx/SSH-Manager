@@ -33,5 +33,6 @@ describe("SSH verification UI is tied to the selected VPS",()=>{
   const html=renderToStaticMarkup(<VerificationPanel nodeId={verification.node_id}
    verification={verification} canManage={false} busy={false} onCancel={()=>{}}/>);
   expect(html).not.toContain("撤销本次挑战");
+  expect(html).not.toContain("SECRET_CHALLENGE_MUST_NOT_CROSS_NODES");
  });
 });
