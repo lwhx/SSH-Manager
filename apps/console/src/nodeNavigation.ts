@@ -12,3 +12,18 @@ export function parseConsoleRoute(hash:string):ConsoleRoute {
  if(parts.length===1&&pages.has(parts[0] as ConsolePage))return {page:parts[0] as ConsolePage,nodeId:null};
  return {page:"dashboard",nodeId:null};
 }
+
+export type NodeDetailTab="overview"|"agent"|"ssh"|"history"|"settings";
+const allowedNodeTabs=new Set<NodeDetailTab>(["overview","agent","ssh","history","settings"]);
+export function parseNodeDetailTab(hash:string):NodeDetailTab {
+ const route=parseConsoleRoute(hash);
+ if(route.page!=="nodes"||!route.nodeId)return "overview";
+ const query=hash.indexOf("?");
+ if(query<0)return "overview";
+ const tab=new URLSearchParams(hash.slice(query+1)).get("tab");
+ return tab&&allowedNodeTabs.has(tab as NodeDetailTab)?tab as NodeDetailTab:"overview";
+}
+export function consoleNodeTabHref(nodeId:string,tab:NodeDetailTab):string {
+ const base=consoleRouteHref("nodes",nodeId);
+ return tab==="overview"||base==="#/nodes"?base:base+"?tab="+tab;
+}

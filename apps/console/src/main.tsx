@@ -7,7 +7,7 @@ import NodeDirectory from "./NodeDirectory";
 import AddNodeWizard,{type NewNodeDraft,type WizardNode,type WizardPair} from "./AddNodeWizard";
 import NodeSettings,{type NodeSettingsInput} from "./NodeSettings";
 import TaskCenter from "./TaskCenter";
-import {parseConsoleRoute,consoleRouteHref,type ConsolePage} from "./nodeNavigation";
+import {parseConsoleRoute,consoleRouteHref,consoleNodeTabHref,parseNodeDetailTab,type ConsolePage,type NodeDetailTab} from "./nodeNavigation";
 import {isNodeOnline} from "./nodeDisplay";
 type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:string;status:string;init_stage:string;last_seen_at?:number;config_revision:string;group_name?:string;notes?:string;created_at?:number;agent_version?:string;os_id?:string};
 type MeInfo={email:string;role:string;manual_ssh_actions_enabled:boolean;agent_gateway_url:string};
@@ -26,7 +26,7 @@ function App(){
  const [route,setRoute]=useState(()=>parseConsoleRoute(window.location.hash));
  const page=route.page;
  const selected=nodes.find(node=>node.id===route.nodeId)||null;
- const [detailTab,setDetailTab]=useState<"overview"|"agent"|"ssh"|"history"|"settings">("overview");
+ const detailTab=parseNodeDetailTab(window.location.hash);
  const [createOpen,setCreateOpen]=useState(false);
  const [message,setMessage]=useState("");
  const [pair,setPair]=useState<PairInfo|null>(null);
@@ -42,11 +42,10 @@ function App(){
  const [operationState,setOperationState]=useState<{status:string;result_code?:string;detail?:string}|null>(null);
  const [busy,setBusy]=useState(false);
  const owner=me?.role==="owner";
- function navigate(next:ConsolePage,nodeId?:string|null){
-  const href=consoleRouteHref(next,nodeId);
+ function navigate(next:ConsolePage,nodeId?:string|null,tab:NodeDetailTab="overview"){
+  const href=next==="nodes"&&nodeId?consoleNodeTabHref(nodeId,tab):consoleRouteHref(next,nodeId);
   window.location.hash=href;
   setRoute(parseConsoleRoute(href));
-  setDetailTab("overview");
   setCreateOpen(false);
  }
  function alertError(e:unknown){setMessage(e instanceof Error?e.message:String(e));}
@@ -226,10 +225,10 @@ function App(){
    <section className="card"><small>尚未配对</small><strong>{nodes.filter(n=>n.status==="unpaired").length}</strong></section></div>
   <NodeDirectory nodes={nodes} canCreate={me.role!=="viewer"} onCreate={()=>setCreateOpen(true)}
    onSelect={node=>navigate("nodes",node.id)}/>
-  {me.role!=="viewer"&&<AddNodeWizard open={createOpen} busy={busy} gateway={me.agent_gateway_url||""}
+  {me.role!=="viewer"&&createOpen&&<AddNodeWizard open={true} busy={busy} gateway={me.agent_gateway_url||""}
    revision={String(import.meta.env.VITE_SSH_MANAGER_COMMIT||"")}
    onClose={()=>setCreateOpen(false)} onCreate={createNodeFromWizard} onNewToken={newWizardToken}
-   onRefresh={refreshWizardNode} onOpenNode={id=>{navigate("nodes",id);setDetailTab("agent");}}/>}
+   onRefresh={refreshWizardNode} onOpenNode={id=>navigate("nodes",id,"agent")}}/>}
  </div>:<div>
   <div className="node-detail-toolbar"><button className="secondary" onClick={()=>navigate("nodes")}>← 服务器列表</button><span> / {selected.name}</span></div>
   <section className="card node-summary"><div><h2>{selected.name}</h2><p>{selected.ssh_host}:{selected.ssh_port} · {selected.login_user} · {selected.group_name||"未分组"}</p></div>
@@ -238,7 +237,7 @@ function App(){
   <div className="node-tabs" role="tablist" aria-label="VPS 管理页签">
    {([["overview","概览"],["agent","Agent 管理"],["ssh","SSH 安全"],["history","操作记录"],["settings","节点设置"]] as const).map(([id,label])=>
     <button key={id} type="button" role="tab" aria-selected={detailTab===id} className={detailTab===id?"active":"secondary"}
-     onClick={()=>setDetailTab(id)}>{label}</button>)}
+     onClick={()=>navigate("nodes",selected.id,id)}>{label}</button>)}
   </div>
   {detailTab==="overview"&&<section className="card">
    <h3>节点概览</h3><div className="overview-grid">
@@ -247,7 +246,7 @@ function App(){
     <div className="hint"><small>当前配置版本</small><code>{selected.config_revision}</code></div>
     <div className="hint"><small>最后心跳</small><strong>{selected.last_seen_at?new Date(selected.last_seen_at*1000).toLocaleString():"暂无记录"}</strong></div>
    </div><p>先在「Agent 管理」完成配对，再在「SSH 安全」逐步检查与验证；人工危险操作需要独立确认。</p>
-   <button className="secondary" onClick={()=>setDetailTab(selected.status==="unpaired"?"agent":"ssh")}>前往下一步 →</button>
+   <button className="secondary" onClick={()=>navigate("nodes",selected.id,selected.status==="unpaired"?"agent":"ssh")}>前往下一步 →</button>
   </section>}
   {detailTab==="agent"&&<section className="card"><h3>Agent 安装、配对与连接</h3>
  <AgentInstallWizard key={selected.id} node={selected} pair={pair}
