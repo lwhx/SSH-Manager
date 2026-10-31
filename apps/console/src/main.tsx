@@ -228,7 +228,7 @@ function App(){
   {me.role!=="viewer"&&createOpen&&<AddNodeWizard open={true} busy={busy} gateway={me.agent_gateway_url||""}
    revision={String(import.meta.env.VITE_SSH_MANAGER_COMMIT||"")}
    onClose={()=>setCreateOpen(false)} onCreate={createNodeFromWizard} onNewToken={newWizardToken}
-   onRefresh={refreshWizardNode} onOpenNode={id=>navigate("nodes",id,"agent")}}/>}
+   onRefresh={refreshWizardNode} onOpenNode={id=>navigate("nodes",id,"agent")}/>}
  </div>:<div>
   <div className="node-detail-toolbar"><button className="secondary" onClick={()=>navigate("nodes")}>← 服务器列表</button><span> / {selected.name}</span></div>
   <section className="card node-summary"><div><h2>{selected.name}</h2><p>{selected.ssh_host}:{selected.ssh_port} · {selected.login_user} · {selected.group_name||"未分组"}</p></div>
