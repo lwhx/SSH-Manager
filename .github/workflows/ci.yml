@@ -29,4 +29,5 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
       - run: sudo python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
       - run: npm run test
+      - run: node scripts/test_gateway_workerd.mjs --local-only
       - run: npm run build:web
