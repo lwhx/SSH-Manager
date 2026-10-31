@@ -126,7 +126,7 @@ test("Wrangler API token credentials are accepted but secrets are not logged",()
 
 test("default root Wrangler config is intentionally inert: cannot expose an unprotected web or Agent endpoint",()=>{
  const cfg=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
- assert.equal(cfg.name,"ssh-manager-staging");
+ assert.equal(cfg.name,"ssh-manager");
  assert.equal(cfg.workers_dev,false);
  assert.equal(cfg.preview_urls,false);
  assert.equal(cfg.assets.run_worker_first,true);

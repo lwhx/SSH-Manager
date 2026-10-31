@@ -17,13 +17,14 @@ import {
  extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse,
  newCloudflareBootstrap,classifyWorkerForBootstrap,parseWranglerAuthToken
 } from "./cloudflare_native_lib.mjs";
+import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets} from "./native_security_helpers.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
 const TEMPLATE=join(ROOT,"wrangler.single.staging.example.jsonc");
 // Wrangler resolves entrypoint/assets relative to config directory -> repo ROOT.
 const CONFIG=join(ROOT,"wrangler.single.staging.native.jsonc");
-const NAME="ssh-manager-staging";
+const NAME=process.env.WRANGLER_CI_OVERRIDE_NAME||"ssh-manager-staging";
 const DB="ssh-manager-staging";
 
 function run(entry,args,options={}){
@@ -96,7 +97,7 @@ function writeConfig(config){
 }
 function originalSecretExists(){
  let items;
- try{items=JSON.parse(wrangler(["secret","list","--config",CONFIG],{capture:true}));}
+ try{items=JSON.parse(wrangler(["secret","list","--config",CONFIG,"--name",NAME],{capture:true}));}
  catch{throw Error("Unable to verify the existing Worker private signing secret");}
  if(!Array.isArray(items)||!items.some(x=>x?.name==="COMMAND_PRIVATE_KEY"))
   throw Error("Original COMMAND_PRIVATE_KEY missing; manual recovery required, no key rotation");
@@ -112,9 +113,9 @@ function migrate(){
  wrangler(["d1","migrations","apply",DB,"--remote","--config",CONFIG]);
 }
 function deploy(){
- wrangler(["deploy","--config",CONFIG]);
+ wrangler(["deploy","--config",CONFIG,"--name",NAME]);
 }
-function initialize(template){
+async function initialize(template,id){
  const params=newCloudflareBootstrap(process.env);
  console.log("Control hostname: "+params.controlHost);
  console.log("Agent hostname:   "+params.agentHost);
@@ -126,13 +127,16 @@ function initialize(template){
  if(!created)throw Error("New D1 is not visible. Stop; DO NOT rerun to rotate the signer.");
  const signer=generateCommandSigner();
  const cfg=buildSingleConfig(template,{...params,dbId:created.id,publicKey:signer.publicKey});
+ cfg.name=NAME;
  writeConfig(cfg);
  console.log("[Staging] Created one D1 and prepared one Worker with SSH writes locked.");
  try{
   migrate();
   deploy();
+  const deployed=await settings(id);
+  verifyWorkerTargets(deployed,{publicKey:signer.publicKey,databaseId:created.id});
   // Private signer exists ONLY in Node process memory and Cloudflare Secret.
-  wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG],{
+  wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG,"--name",NAME],{
    input:signer.privateKeyPkcs8Base64+"\n"
   });
   originalSecretExists();
@@ -143,8 +147,44 @@ function initialize(template){
  }
  console.log("INITIAL DEPLOY OK. Original private signer stored in Cloudflare only.");
 }
-function update(template,remote,dbs){
+async function repairOrphanedSigner(template,remote,dbs,id){
+ if(process.env.SSH_MANAGER_RECOVER_EMPTY_STAGING!==SIGNER_RECOVERY_FLAG){
+  throw Error("Connected Worker has no COMMAND_PRIVATE_KEY. Set the explicit one-time Staging recovery variable only after confirming the database is empty.");
+ }
+ const cfg=extractExistingStagingWorker(template,remote,dbs,{allowMissingSigner:true});
+ cfg.name=NAME;
+ writeConfig(cfg);
+ verifyWorkerTargets(remote,{
+  publicKey:cfg.vars.COMMAND_PUBLIC_KEY,databaseId:cfg.d1_databases[0].database_id
+ });
+ const query=wrangler(["d1","execute","DB","--remote","--json",
+  "--config",CONFIG,"--command",EMPTY_STAGING_SQL],{capture:true});
+ let data;
+ try{data=JSON.parse(query);}catch{
+  throw Error("Remote D1 recovery check returned invalid JSON; refusing signer reset");
+ }
+ validateEmptyStagingQuery(data);
+ const signer=generateCommandSigner();
+ cfg.vars.COMMAND_PUBLIC_KEY=signer.publicKey;
+ writeFileSync(CONFIG,JSON.stringify(cfg,null,2)+"\n",{mode:0o600});
+ migrate();
+ deploy();
+ const deployed=await settings(id);
+ verifyWorkerTargets(deployed,{publicKey:signer.publicKey,databaseId:cfg.d1_databases[0].database_id});
+ wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG,"--name",NAME],{
+  input:signer.privateKeyPkcs8Base64+"\n"
+ });
+ originalSecretExists();
+ console.log("RECOVERY OK on the actual connected Worker. Remove SSH_MANAGER_RECOVER_EMPTY_STAGING from Cloudflare Build variables now.");
+}
+async function update(template,remote,dbs,id){
+ const missingSecret=!remote?.bindings?.some(x=>x?.name==="COMMAND_PRIVATE_KEY");
+ if(missingSecret){
+  await repairOrphanedSigner(template,remote,dbs,id);
+  return;
+ }
  const cfg=extractExistingStagingWorker(template,remote,dbs);
+ cfg.name=NAME;
  writeConfig(cfg);
  console.log("[Staging] Reusing existing Worker, domains, Access, D1, DO and public signer.");
  originalSecretExists();
@@ -155,6 +195,8 @@ function update(template,remote,dbs){
 async function main(){
  if(process.argv.length!==2)throw Error("Use npm run cf:deploy without arguments");
  const branch=process.env.WORKERS_CI_BRANCH||process.env.GITHUB_REF_NAME;
+ if(!/^(ssh-manager|ssh-manager-staging)$/.test(NAME))throw Error("Unexpected connected Cloudflare Worker name");
+ if(process.env.WORKERS_CI&&!process.env.WRANGLER_CI_OVERRIDE_NAME)throw Error("Missing Cloudflare Builds Worker target: WRANGLER_CI_OVERRIDE_NAME");
  if(branch&&branch!=="main")throw Error("Only main may deploy Staging; previews are disabled");
  if(existsSync(CONFIG))throw Error("An existing temporary Staging config was found; refusing overwrite");
  if(Number(process.versions.node.split(".")[0])<22)throw Error("Node.js 22+ required");
@@ -167,8 +209,8 @@ async function main(){
  const template=JSON.parse(readFileSync(TEMPLATE,"utf8"));
  console.log("Cloudflare single-Worker deployment mode: "+mode);
  try{
-  if(mode==="new")initialize(template);
-  else update(template,remote,dbs);
+  if(mode==="new")await initialize(template,id);
+  else await update(template,remote,dbs,id);
  }finally{
   rmSync(CONFIG,{force:true}); // Non-secret temporary configuration.
  }

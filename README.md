@@ -30,6 +30,8 @@
 
 仍支持本地 PowerShell 备用方案：npm install → npx wrangler login → npm run cf:quick。
 
+> Cloudflare Workers Builds 名称错位导致签名私钥上传到另一 Worker 时，请勿删除已创建的 D1。修复请查看 [签名密钥安全恢复指南](docs/CLOUDFLARE_SPLIT_SIGNER_RECOVERY.md)。
+
 ## 核心安全约束
 
 1. 只保存日常公钥和救援公钥；用户的 SSH 私钥不上传 Cloudflare/GitHub/Agent。
