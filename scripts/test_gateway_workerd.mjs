@@ -133,10 +133,9 @@ async function main(){
  const rootPublic=toURL(await webcrypto.subtle.exportKey("raw",rootKey.publicKey));
  const cfg=JSON.parse(fs.readFileSync(repoConfig,"utf8"));
  cfg.name="ssh-manager-single-local-contract";
- // Test with Agent host = loopback; remove Custom Domain routes and static
- // assets in the fixture only. Cloudflare production always uses both.
+ // Test with Agent host = loopback; remove Custom Domain routes only. The
+ // same Worker still serves real built assets on Control host after JWT gate.
  delete cfg.routes;
- delete cfg.assets;
  cfg.workers_dev=true;
  cfg.vars.CONTROL_HOSTNAME="console.local.invalid";
  cfg.vars.AGENT_HOSTNAME="127.0.0.1";
