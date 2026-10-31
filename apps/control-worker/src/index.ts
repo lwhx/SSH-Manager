@@ -1,4 +1,5 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
+import {parseNodeChanges} from "./nodeMetadata";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
@@ -11,7 +12,7 @@ interface Env {
 }
 interface Actor {id:string; email:string; role:string; subject:string;}
 const jsonLimit=8192;
-const allowedMethods=new Set(["GET","POST","PUT"]);
+const allowedMethods=new Set(["GET","POST","PUT","PATCH"]);
 function ensure(condition:unknown,code:string,status=400):asserts condition {if(!condition)throw new ApiError(code,status);}
 async function bodyJSON(req:Request):Promise<Record<string,unknown>> {
   const txt=await req.text();
@@ -180,7 +181,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
     manual_ssh_actions_enabled:env.MANUAL_SSH_ACTIONS_ENABLED==="true"
   });
   if(p==="/api/v1/nodes"&&req.method==="GET"){
-    const q=await env.DB.prepare("SELECT id,name,ssh_host,ssh_port,login_user,status,init_stage,config_revision,agent_version,os_id,last_seen_at,created_at FROM nodes ORDER BY created_at DESC").all();
+    const q=await env.DB.prepare("SELECT id,name,ssh_host,ssh_port,login_user,status,init_stage,config_revision,agent_version,os_id,last_seen_at,created_at,group_name,notes FROM nodes ORDER BY created_at DESC").all();
     return response({nodes:q.results});
   }
   if(p==="/api/v1/nodes"&&req.method==="POST"){
@@ -198,6 +199,18 @@ async function handle(req:Request,env:Env):Promise<Response>{
   if(nodeMatch){
     const node=await findNode(env,nodeMatch[1]),sub=nodeMatch[2]||"";
     if(!sub&&req.method==="GET")return response({node});
+    if(!sub&&req.method==="PATCH"){
+      needRole(a,"admin");
+      let changes;
+      try{changes=parseNodeChanges(await bodyJSON(req),{
+        name:node.name,group_name:node.group_name||"",notes:node.notes||"",
+        ssh_host:node.ssh_host,ssh_port:node.ssh_port,login_user:node.login_user,status:node.status
+      });}catch(e){throw new ApiError(e instanceof Error?e.message:"INVALID_NODE_SETTINGS",400);}
+      await env.DB.prepare("UPDATE nodes SET name=?,group_name=?,notes=?,ssh_host=?,ssh_port=?,login_user=? WHERE id=?")
+       .bind(changes.name,changes.group_name,changes.notes,changes.ssh_host,changes.ssh_port,changes.login_user,node.id).run();
+      await audit(env,a,node.id,"node.settings.update","ok");
+      return response({node:{...node,...changes}});
+    }
     if(sub==="pairing-token"&&req.method==="POST"){
       needRole(a,"admin");
       ensure(node.status==="unpaired","NODE_ALREADY_PAIRED",409);
@@ -484,6 +497,17 @@ async function handle(req:Request,env:Env):Promise<Response>{
     await env.DB.batch(changes);
     await audit(env,a,null,"keys."+purpose+".update","ok");
     return response({id,purpose,fingerprint:key.fingerprint,version,installed_nodes:0});
+  }
+  if(p==="/api/v1/operations"&&req.method==="GET"){
+    const nodeId=url.searchParams.get("node_id");
+    if(nodeId)ensure(validNodeId(nodeId),"INVALID_NODE_ID",400);
+    const q=nodeId?
+      await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations WHERE node_id=? ORDER BY created_at DESC LIMIT 100").bind(nodeId).all():
+      await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations ORDER BY created_at DESC LIMIT 100").all();
+    return response({operations:q.results.map((op:any)=>({
+      ...op,status:op.status==="DISPATCHED"&&op.expires_at<=now()?"RESULT_UNKNOWN":
+      op.status==="CREATED"&&op.expires_at<=now()?"EXPIRED":op.status
+    }))});
   }
   const opMatch=/^\/api\/v1\/operations\/([a-f0-9-]{36})$/.exec(p);
   if(opMatch&&req.method==="GET"){
