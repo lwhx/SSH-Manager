@@ -29,7 +29,7 @@ Windows PowerShell：
 ~~~powershell
 git clone https://github.com/lwhx/SSH-Manager.git
 cd SSH-Manager
-npm ci
+npm install
 npx wrangler login
 npm run cf:quick
 ~~~
@@ -63,7 +63,7 @@ npm run cf:quick
 
 ~~~powershell
 git pull --ff-only
-npm ci
+npm install
 npm run cf:quick
 ~~~
 

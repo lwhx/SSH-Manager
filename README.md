@@ -63,7 +63,7 @@ cd agent && go test ./...
 先在 Cloudflare Zero Trust 创建 Control 的 Access Application，配置 GitHub/Cloudflare 登录、Owner Allow 规则，取得 Team Domain 和 AUD。
 
 ```bash
-npm ci
+npm install
 npx wrangler login
 npm run cf:quick
 ```

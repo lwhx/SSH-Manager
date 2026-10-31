@@ -44,7 +44,7 @@ function runNode(entry,args=[],options={}){
  return capture?String(result.stdout||""):"";
 }
 function wrangler(args,options={}){
- if(!existsSync(WRANGLER))throw Error("Missing Wrangler. Run npm ci before npm run cf:quick.");
+ if(!existsSync(WRANGLER))throw Error("Missing Wrangler. Run npm install before npm run cf:quick.");
  return runNode(WRANGLER,args,options);
 }
 function databaseList(){
@@ -76,7 +76,7 @@ function validateLocal(){
  return {control,gateway,state};
 }
 function build(){
- if(!existsSync(TSC)||!existsSync(VITE))throw Error("Dependencies are missing. Run npm ci first.");
+ if(!existsSync(TSC)||!existsSync(VITE))throw Error("Dependencies are missing. Run npm install first.");
  console.log("\n[1/4] Checking code and building the Chinese web panel...");
  runNode(TSC,["--noEmit"]);
  runNode(VITE,["build","--config","apps/console/vite.config.ts"]);
@@ -199,7 +199,7 @@ async function main(){
  const args=process.argv.slice(2);
  if(args.some(x=>!["--dry-run","--help"].includes(x)))throw Error("Unknown option. Supported: --dry-run, --help");
  if(args.includes("--help")){
-  console.log("Run: npm ci && npm run cf:quick");
+  console.log("Run: npm install && npm run cf:quick");
   console.log("First run prompts for Access team, AUD, Owner and STAGING confirmation.");
   console.log("Next runs safely reuse D1 and signer. --dry-run never contacts Cloudflare.");
   return;
@@ -221,7 +221,7 @@ async function main(){
   return;
  }
  const existing=validateLocal();
- if(!existsSync(WRANGLER))throw Error("Run npm ci to install Wrangler first");
+ if(!existsSync(WRANGLER))throw Error("Run npm install to install Wrangler first");
  build();
  if(existing)await updateExisting(existing);
  else await bootstrap();
