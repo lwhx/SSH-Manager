@@ -6,6 +6,7 @@ package sshhelper
 import (
  "context"
  "crypto/ed25519"
+ "crypto/ed25519"
  "encoding/base64"
  "encoding/json"
  "errors"
@@ -34,6 +35,7 @@ type Config struct{
  SSHPort int `json:"ssh_port"`
  SnapshotRoot string `json:"snapshot_root"`
  EnableDailyInstall bool `json:"enable_daily_install"`
+ EnableSSHProof bool `json:"enable_ssh_proof"`
 }
 
 type SignedCommand struct{
@@ -74,6 +76,8 @@ type Handler struct{
  Install KeyInstaller
  Journal *Journal
  Challenges *ChallengeStore
+ ProofSigningKey ed25519.PrivateKey
+ Outbox *Outbox
  Clock func()time.Time
  EUID func()int
 }

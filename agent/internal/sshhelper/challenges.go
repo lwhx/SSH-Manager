@@ -25,6 +25,7 @@ type PreparedChallenge struct {
  ConfigRevision string `json:"config_revision"`
  IssuedAt int64 `json:"issued_at"`
  ExpiresAt int64 `json:"expires_at"`
+ PreparedAt int64 `json:"prepared_at,omitempty"`
 }
 var keyFingerprintRE=regexp.MustCompile("^SHA256:[A-Za-z0-9+/]{43}$")
 var hexHashRE=regexp.MustCompile("^[a-f0-9]{64}$")
@@ -62,6 +63,7 @@ func (s *ChallengeStore)Save(p PreparedChallenge)error{
  file,err:=os.OpenFile(destination,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600)
  if errors.Is(err,os.ErrExist){return errors.New("verification already prepared")}
  if err!=nil{return err}
+ p.PreparedAt=time.Now().Unix()
  data,err:=json.Marshal(p)
  if err!=nil{_ = file.Close();return err}
  if _,err=file.Write(data);err!=nil{_ = file.Close();return err}
