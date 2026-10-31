@@ -25,5 +25,6 @@ jobs:
       - run: npm run check
       - run: python3 scripts/test_migrations.py
       - run: python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
+      - run: sudo python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
       - run: npm run test
       - run: npm run build:web

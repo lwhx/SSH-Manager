@@ -40,6 +40,12 @@ func TestOnlyExactKernelSSHAncestryMaySatisfyVerification(t *testing.T){
   t.Fatal("accepted duplicate authentication event")
  }
  if _,err:=FindSessionEvent(bad,300,expected,read);err==nil{t.Fatal("accepted unrelated sshd PID")}
+ // An inherited stdout/stderr journal stream may attribute child output
+ // to the SSH master process. Even with a matching PID we MUST reject it.
+ stdoutRecord:=bytes.Replace(good,[]byte(`"_TRANSPORT":"syslog"`),[]byte(`"_TRANSPORT":"stdout"`),1)
+ if _,err:=FindSessionEvent(stdoutRecord,300,expected,read);err==nil{
+  t.Fatal("inherited stdout parent-PID record impersonated this SSH session")
+ }
 }
 func TestRejectPasswordAuthAndPreChallengeSessions(t *testing.T){
  at:=time.Unix(1793440000,0)

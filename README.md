@@ -134,3 +134,7 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 ## P3.3 可信 Root 签名证明（Staging 原型）
 
 已实现会话内无特权 CLI `ssh-manager-prove`、Root 独立证明 Socket、只读 sshd/journald 认证检查、Root Ed25519 签名、Agent 安全转发、Owner 单节点证明公钥固定，以及 Cloudflare 一次性 VERIFIED 更新。**尚未通过真实 VPS + Cloudflare Staging E2E；P4 密码认证关闭依然锁定。** 见 [P3.3 隔离验收与 Windows PowerShell 验证指南](docs/P3_PROOF_END_TO_END.md)。需应用所有迁移，包括 0005。
+
+### P3.3 Staging 只读兼容性预检
+
+在独立隔离 VPS 上可运行 `sudo python3 scripts/staging_proof_preflight.py --staging-only`。不会修改 SSH 配置，输出受限目录权限、OpenSSH 策略、真实 journald 来源等 PASS/WARN/FAIL，**永不自行产生 VERIFIED**。进一步硬化：拒绝 journald stdout/stderr 的父进程 PID 归属，避免将另一 SSH 会话的成功认证误判为当前会话。

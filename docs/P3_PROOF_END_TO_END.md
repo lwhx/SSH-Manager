@@ -21,6 +21,20 @@
 7. Root Helper 本机一次性消费挑战并签署证明，保存于私有出站队列；Agent 只能转发，不能签名。
 8. Cloudflare 校验该节点 Owner 固定的 Root 公钥、节点、用户、密钥、配置版本和到期时间，用 D1 条件 UPDATE **一次性**改为 VERIFIED。相同已签名证明重试仅允许幂等确认。
 
+## 新增：只读 Staging 兼容性预检
+
+仓库提供 `scripts/staging_proof_preflight.py`。请仅在**专门的隔离测试 VPS** 上运行。它不会创建账户、安装密钥、修改 sshd、执行重载或改变防火墙：
+
+```bash
+sudo python3 scripts/staging_proof_preflight.py --staging-only
+```
+
+工具输出 JSON 的 `PASS`、`WARN`、`FAIL`：检查 Root Helper 0600 配置、目标 Linux 用户、明确的 SSH 连接上下文、`sshd -t` 与 `sshd -T -C`、私有证明密钥目录、证明 Socket、`/proc` 和本机近两小时是否存在可信 SSHD 公钥认证日志。`WARN` 常表示尚未安装/启用或没有最近认证日志；`FAIL` 则表示当前配置需要处理。
+
+重要：无论报告包含多少 `PASS`，`actual_ssh_login_proven` 和 `cloudflare_end_to_end_verified` 都固定为 `false`。**预检不是验证成功，也不会影响任何 D1 VERIFIED 状态。**
+
+根据 systemd 官方 journald 说明，`_TRANSPORT=stdout` 时 PID 可能代表打开日志流的父进程，因此 Root Helper 和预检工具会直接拒绝这类日志；只接受来源为 `syslog` 或 `journal` 且具有正确可信元数据的记录。如果某个发行版通过 stdout 转发 SSH 日志，就必须按“不兼容”处理，不能为了通过验证降低要求。
+
 ## 三、隔离 VPS 手动准备（不得用于生产）
 
 - 确认能够通过云服务商控制台登录，并保留现有管理员 SSH 会话和配置快照。
