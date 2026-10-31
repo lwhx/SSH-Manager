@@ -92,7 +92,7 @@ class VerifiedTransitionTests(unittest.TestCase):
         )
 
     def verify(self, *, time=150, fail_midway=False, nonce_hash=NONCE_HASH):
-        self.db.execute("BEGIN IMMEDIATE")
+        self.db.execute("SAVEPOINT proof_transition")
         try:
             proof = PROOF
             changed = self.db.execute(
@@ -118,10 +118,11 @@ class VerifiedTransitionTests(unittest.TestCase):
             if audited != 1:
                 raise ValueError("human-attributed root proof audit was not inserted")
         except Exception:
-            self.db.execute("ROLLBACK")
+            self.db.execute("ROLLBACK TO proof_transition")
+            self.db.execute("RELEASE proof_transition")
             raise
         else:
-            self.db.execute("COMMIT")
+            self.db.execute("RELEASE proof_transition")
 
     def test_atomic_verified_records_all_four_entities(self):
         self.verify()
