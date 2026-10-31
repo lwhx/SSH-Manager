@@ -42,11 +42,12 @@ def invoke(argv: list[str], timeout: int = 10) -> tuple[int, str]:
 
 
 def check_meta(path: pathlib.Path, kind: str, uid: int | None, mode: int | None = None,
-               forbid_other_writes: bool = True) -> tuple[str, str]:
+               forbid_other_writes: bool = True, expected_gid: int | None = None,
+               required: bool = True) -> tuple[str, str]:
     try:
         s = path.lstat()
     except FileNotFoundError:
-        return 'WARN', 'not installed or not running'
+        return ('FAIL' if required else 'WARN'), 'required path missing' if required else 'not installed or not running'
     except OSError:
         return 'FAIL', 'cannot inspect path'
     if kind == 'file' and not stat.S_ISREG(s.st_mode):
@@ -57,6 +58,8 @@ def check_meta(path: pathlib.Path, kind: str, uid: int | None, mode: int | None 
         return 'FAIL', 'not a local Unix socket'
     if uid is not None and s.st_uid != uid:
         return 'FAIL', 'unexpected file owner'
+    if expected_gid is not None and s.st_gid != expected_gid:
+        return 'FAIL', 'unexpected file group'
     m = stat.S_IMODE(s.st_mode)
     if mode is not None and m != mode:
         return 'FAIL', f'unsafe mode {m:04o} (expected {mode:04o})'
@@ -65,6 +68,8 @@ def check_meta(path: pathlib.Path, kind: str, uid: int | None, mode: int | None 
         # to its Unix socket (0660); reject *world* accessibility instead.
         if m & 0o007:
             return 'FAIL', 'Unix socket accessible to untrusted users'
+        if m != 0o660:
+            return 'FAIL', 'Unix socket must have mode 0660'
     elif forbid_other_writes and m & 0o022:
         return 'FAIL', 'group/other write access prohibited'
     return 'PASS', 'path and ownership checked'
@@ -78,6 +83,40 @@ def get_user(name: str) -> tuple[int, int] | None:
     except KeyError:
         return None
     return u.pw_uid, u.pw_gid
+
+
+def helper_scope_matches(raw: object, args: argparse.Namespace) -> bool:
+    """Compare only non-secret fields; never echo any config value."""
+    if not isinstance(raw, dict):
+        return False
+    safe = raw
+    return (
+        safe.get('node_id') == args.node_id
+        and safe.get('allowed_user') == args.login_user
+        and safe.get('client_address') == args.client_ip
+        and safe.get('local_address') == args.local_ip
+        and type(safe.get('ssh_port')) is int
+        and safe.get('ssh_port') == args.ssh_port
+        and safe.get('enable_ssh_proof') is True
+    )
+
+
+def verify_helper_scope(path: pathlib.Path, args: argparse.Namespace) -> tuple[str, str]:
+    """Check root-owned non-secret Helper configuration without printing it."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, 'rb') as f:
+            if os.fstat(f.fileno()).st_size > 8192:
+                return 'FAIL', 'Root Helper config too large'
+            content = f.read(8193)
+        if len(content) > 8192:
+            return 'FAIL', 'Root Helper config too large'
+        decoded = json.loads(content)
+    except (OSError, ValueError, UnicodeError):
+        return 'FAIL', 'cannot safely read non-secret Root Helper configuration'
+    return ('PASS', 'selected node and login context matches Root Helper') if helper_scope_matches(decoded, args) else (
+        'FAIL', 'Root Helper node, login path or explicit SSH proof setting differs from requested staging context'
+    )
 
 
 def systemd_properties(unit: str) -> dict[str, str]:
@@ -145,39 +184,43 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     add('login_identity', 'PASS' if login else 'FAIL',
         'target Linux user found' if login else 'invalid or missing target user')
     agent_uid = service[0] if service else -1
+    agent_gid = service[1] if service else -1
+    login_gid = login[1] if login else -1
 
     checksums = [
         ('root_config', ROOT_CONFIG, 'file', 0, 0o600),
         ('agent_config', AGENT_CONFIG, 'file', agent_uid, 0o600),
         ('root_state', ROOT_DIR, 'dir', 0, 0o700),
         ('agent_state', AGENT_DIR, 'dir', agent_uid, 0o700),
-        ('helper_socket', ROOT_SOCK, 'socket', 0, None),
-        ('proof_socket', PROOF_SOCK, 'socket', 0, None),
+        ('helper_socket', ROOT_SOCK, 'socket', 0, 0o660),
+        ('proof_socket', PROOF_SOCK, 'socket', 0, 0o660),
     ]
     for section, p, kind, uid, mode in checksums:
-        result, why = check_meta(p, kind, uid, mode)
+        expected_gid = agent_gid if section == 'helper_socket' else (login_gid if section == 'proof_socket' else None)
+        result, why = check_meta(p, kind, uid, mode, expected_gid=expected_gid)
         add(section, result, why)
+        if section == 'root_config' and result == 'PASS':
+            scope_status, reason = verify_helper_scope(p, args)
+            add('helper_scope', scope_status, reason)
 
     for unit, expected_user in (('ssh-manager-agent.service', 'ssh-manager'),
                                 ('ssh-manager-helper.service', 'root')):
         p = systemd_properties(unit)
         if p.get('LoadState') != 'loaded':
-            add(unit, 'WARN', 'unit not installed; cannot check live account')
-        elif p.get('User', '') != expected_user:
-            add(unit, 'FAIL', 'service account does not match minimum-privilege design')
-        elif p.get('ActiveState') != 'active':
-            add(unit, 'WARN', 'service installed but not active')
-        else:
-            add(unit, 'PASS', 'running under expected service account')
-            desired_state = ('ssh-manager-agent' if expected_user == 'ssh-manager'
-                             else 'ssh-manager-root')
-            dirs = p.get('StateDirectory', '').split()
-            add(unit + ':state_dir', 'PASS' if desired_state in dirs else 'FAIL',
-                'expected dedicated systemd persistent state directory' if desired_state in dirs
-                else 'systemd persistent directory missing or incorrect')
-            if p.get('NoNewPrivileges') != 'yes':
-                add(unit + ':privileges', 'WARN',
-                    'NoNewPrivileges is not enabled; review the unit hardening')
+            add(unit, 'FAIL', 'required service not installed')
+            continue
+        add(unit + ':account', 'PASS' if p.get('User') == expected_user else 'FAIL',
+            'expected service user' if p.get('User') == expected_user else 'wrong service user')
+        add(unit + ':group', 'PASS' if p.get('Group') == 'ssh-manager' else 'FAIL',
+            'expected dedicated service group' if p.get('Group') == 'ssh-manager' else 'wrong service group')
+        add(unit + ':active', 'PASS' if p.get('ActiveState') == 'active' else 'FAIL',
+            'service active' if p.get('ActiveState') == 'active' else 'required service not active')
+        desired_state = 'ssh-manager-agent' if expected_user == 'ssh-manager' else 'ssh-manager-root'
+        dirs = p.get('StateDirectory', '').split()
+        add(unit + ':state_dir', 'PASS' if desired_state in dirs else 'FAIL',
+            'dedicated persistent state configured' if desired_state in dirs else 'persistent state directory missing')
+        add(unit + ':privileges', 'PASS' if p.get('NoNewPrivileges') == 'yes' else 'FAIL',
+            'NoNewPrivileges enabled' if p.get('NoNewPrivileges') == 'yes' else 'privilege hardening disabled')
 
     if not pathlib.Path(SSHD).is_file():
         add('sshd_syntax', 'FAIL', 'expected OpenSSH binary missing')
@@ -194,12 +237,21 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 add('sshd_effective', 'FAIL', 'sshd -T -C failed for staging context')
             else:
                 opts = effective_options(text)
+                problems = []
                 if opts.get('pubkeyauthentication') != 'yes':
-                    add('sshd_effective', 'FAIL', 'public key authentication is not active')
-                elif opts.get('authenticationmethods', 'any') != 'any':
-                    add('sshd_effective', 'WARN', 'multi-factor/multi-method policy needs manual proof compatibility review')
-                else:
-                    add('sshd_effective', 'PASS', 'public key authentication enabled for selected context')
+                    problems.append('public key authentication inactive')
+                if opts.get('authorizedkeysfile') not in {
+                    '.ssh/authorized_keys', '.ssh/authorized_keys .ssh/authorized_keys2'
+                }:
+                    problems.append('unsupported authorized_keys location')
+                if opts.get('authenticationmethods', 'any') != 'any':
+                    problems.append('nonstandard AuthenticationMethods')
+                if args.login_user == 'root' and opts.get('permitrootlogin') not in {
+                    'yes', 'prohibit-password', 'without-password'
+                }:
+                    problems.append('root key login disabled')
+                add('sshd_effective', 'FAIL' if problems else 'PASS',
+                    '; '.join(problems) if problems else 'daily key policy compatible')
                 # This diagnostic intentionally does not display credential paths
                 # or suggest changes to PasswordAuthentication.
                 add('sshd_config_change', 'PASS', 'no sshd configuration modifications attempted')
@@ -228,8 +280,9 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         'checks': checks,
         'fail_count': sum(x['status'] == 'FAIL' for x in checks),
         'warn_count': sum(x['status'] == 'WARN' for x in checks),
+        'preflight_ready': all(x['status'] == 'PASS' for x in checks),
     }
-    return result, 2 if result['fail_count'] else 0
+    return result, 2 if result['fail_count'] else (3 if result['warn_count'] else 0)
 
 
 def ip_address(value: str) -> str:
@@ -242,6 +295,7 @@ def main() -> None:
     parser.add_argument('--staging-only', action='store_true', required=True,
                         help='explicitly acknowledge that this is an isolated staging VPS')
     parser.add_argument('--login-user', required=True)
+    parser.add_argument('--node-id', required=True, help='selected single-VPS node UUID in SSH Manager')
     parser.add_argument('--client-ip', required=True, type=ip_address,
                         help='IP that sshd sees as the client; not your private key')
     parser.add_argument('--local-ip', required=True, type=ip_address,
@@ -250,6 +304,8 @@ def main() -> None:
     args = parser.parse_args()
     if not 1 <= args.ssh_port <= 65535:
         parser.error('--ssh-port must be from 1 through 65535')
+    if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', args.node_id):
+        parser.error('--node-id must be a canonical lowercase UUID')
     report, status = run(args)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     raise SystemExit(status)

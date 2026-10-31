@@ -29,14 +29,15 @@
 sudo python3 scripts/staging_readiness.py \
   --staging-only \
   --login-user root \
+  --node-id NODE_UUID_FROM_SELECTED_STAGING_VPS \
   --client-ip 203.0.113.10 \
   --local-ip 192.0.2.10 \
   --ssh-port 22
 ```
 
-将这些**文档示例地址**替换成此次 Staging 环境中 `sshd` 实际看到的客户端 IP 和服务器本地监听 IP。脚本只读取文件元数据、systemd 服务状态、`sshd -t/-T -C` 生效选项和最近两小时的 journald 认证记录。脚本**不会读取 SSH 私钥内容、不会修改 authorized_keys、不会写 sshd_config、不会重启 systemd、不会访问网络**。
+将这些**文档示例地址**替换成此次 Staging 环境中 `sshd` 实际看到的客户端 IP 和服务器本地监听 IP。脚本检查文件元数据、Socket 严格属组与 0660 权限、systemd 服务状态、`sshd -t/-T -C` 生效选项和最近两小时的 journald 认证记录；还会读取 **Root Helper 配置中的非敏感节点/登录上下文字段**进行单 VPS 匹配，但不会输出配置内容，也不会读取 Agent 设备私钥。脚本**不会读取 SSH 私钥内容、不会修改 authorized_keys、不会写 sshd_config、不会重启 systemd、不会访问网络**。
 
-退出码 `0` 表示没有严重前置条件失败（仍可能存在 `WARN`）；退出码 `2` 表示有 `FAIL`、必须解决后才继续。无论退出码是什么，输出中的 `actual_ssh_login_proven=false` 与 `cloudflare_remote_e2e_verified=false` 都不会被自动改为 true。这个工具**不是服务器可信登录证明器**。
+退出码 `0` 仅表示全部前置项为 `PASS`；退出码 `2` 表示有 `FAIL`，必须解决；退出码 `3` 表示只有 `WARN`，需要人工检查。关键文件和服务缺失会直接标记为 `FAIL`。无论退出码是什么，输出中的 `actual_ssh_login_proven=false` 与 `cloudflare_remote_e2e_verified=false` 都不会被自动改为 true。这个工具**不是服务器可信登录证明器**。
 
 完整 P3.3 SSH 认证取证、Windows PowerShell 流程及原始密钥安全要求仍以 `docs/P3_PROOF_END_TO_END.md` 为准。本文件不替代 Root Helper 的既有 `scripts/staging_proof_preflight.py`，而是额外审查 systemd 运行账户、Socket 与状态目录权限。
 

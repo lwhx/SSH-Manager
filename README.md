@@ -154,3 +154,8 @@ Root Helper 执行签名命令后，先在 root-only 日志中持久化准确终
 ### P3.3 本地 workerd / D1 合约验收
 
 GitHub Actions 的 control job 运行 `node scripts/test_gateway_workerd.mjs --local-only`，通过真实本地 Worker + 临时 D1 验证 Agent Ed25519 请求签名、Root 证明验签、nonce 重放拒绝、PENDING→VERIFIED、幂等 ACK、事务审计及故障回滚。只监听本机回环地址，不连接远程 Cloudflare 或任何 VPS。**这不是正式 Cloudflare Staging / 真实 Linux SSHD 端到端验收**，P4 仍未开放。
+
+
+### P3.4 独立 Staging VPS 只读准入检查
+
+已新增 [只读 readiness 检查](scripts/staging_readiness.py) 和 [P3.4 Staging E2E 验收矩阵](docs/P3_STAGING_E2E_ACCEPTANCE.md)，要求显式提供当前选中的单台 VPS node UUID、登录用户、SSH 来源/本地 IP 与端口。检查 systemd 服务账户、私钥文件权限、Root Helper 的非敏感节点配置、Socket 属组/0660、可信 journald 和 OpenSSH 有效策略。退出码 0=全部 PASS、2=FAIL、3=仅 WARN；**不读取私钥、不更改 SSH，也不自行设为 VERIFIED**。CI 运行对应 8 项 Python 单元测试。

@@ -50,8 +50,8 @@ class CollectorTests(unittest.TestCase):
             path.chmod(0o644)
             self.assertEqual(sr.check_meta(path, 'file', uid, 0o600)[0], 'FAIL')
 
-    def test_systemd_missing_is_warning_not_success(self):
-        args = argparse.Namespace(login_user='root', client_ip='192.0.2.10',
+    def test_systemd_missing_blocks_preflight(self):
+        args = argparse.Namespace(node_id='10000000-0000-4000-8000-000000000001', login_user='root', client_ip='192.0.2.10',
                                   local_ip='192.0.2.11', ssh_port=22)
         with patch.object(sr, 'invoke', return_value=(127, '')), \
              patch.object(sr, 'get_user', return_value=None), \
@@ -63,6 +63,7 @@ class CollectorTests(unittest.TestCase):
         self.assertFalse(doc['actual_ssh_login_proven'])
         self.assertFalse(doc['cloudflare_remote_e2e_verified'])
         self.assertFalse(doc['ssh_changes'])
+        self.assertFalse(doc['preflight_ready'])
         self.assertTrue(any(c['status'] == 'FAIL' for c in doc['checks']))
 
     def test_unix_socket_may_be_group_writable_but_not_world_writable(self):
@@ -77,6 +78,45 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual(sr.check_meta(p, 'socket', os.geteuid())[0], 'FAIL')
             finally:
                 sock.close()
+
+    def test_helper_scope_requires_exact_node_login_and_explicit_proof_flag(self):
+        args = argparse.Namespace(node_id='10000000-0000-4000-8000-000000000001',
+                                  login_user='root', client_ip='192.0.2.10',
+                                  local_ip='192.0.2.11', ssh_port=22)
+        config = {'node_id': args.node_id, 'allowed_user': 'root',
+                  'client_address': args.client_ip, 'local_address': args.local_ip,
+                  'ssh_port': 22, 'enable_ssh_proof': True}
+        self.assertTrue(sr.helper_scope_matches(config, args))
+        for key, value in (('node_id','different'), ('allowed_user','ubuntu'),
+                           ('client_address','203.0.113.9'), ('ssh_port', 2200),
+                           ('enable_ssh_proof', False)):
+            self.assertFalse(sr.helper_scope_matches({**config,key:value}, args))
+        self.assertFalse(sr.helper_scope_matches({**config,'ssh_port':True}, args))
+        with tempfile.TemporaryDirectory() as directory:
+            p=Path(directory) / 'helper.json'
+            p.write_text(json.dumps(config))
+            self.assertEqual(sr.verify_helper_scope(p,args)[0], 'PASS')
+            p.write_text('{garbled')
+            self.assertEqual(sr.verify_helper_scope(p,args)[0], 'FAIL')
+
+    def test_wrong_socket_group_blocks_staging(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'helper.sock'
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.bind(str(p))
+                p.chmod(0o660)
+                self.assertEqual(sr.check_meta(p, 'socket', os.geteuid(),
+                                               0o660, expected_gid=os.getegid())[0], 'PASS')
+                self.assertEqual(sr.check_meta(p, 'socket', os.geteuid(),
+                                               0o660, expected_gid=os.getegid() + 1)[0], 'FAIL')
+            finally:
+                sock.close()
+
+    def test_missing_required_files_fail_not_warn(self):
+        p = Path('/unlikely/p3-4-test-absent/ssh-manager.sock')
+        self.assertEqual(sr.check_meta(p, 'socket', 0, 0o660)[0], 'FAIL')
+        self.assertEqual(sr.check_meta(p, 'socket', 0, 0o660, required=False)[0], 'WARN')
 
     def test_options_and_binaries_are_not_executable_injections(self):
         self.assertEqual(sr.effective_options('pubkeyauthentication yes\npasswordauthentication no\n')['pubkeyauthentication'], 'yes')
