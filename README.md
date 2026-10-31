@@ -19,7 +19,7 @@
 ## Cloudflare 3 步部署（推荐，不需要本地命令）
 
 1. Cloudflare Zero Trust → 为 ssh-staging.你的主域名创建 **Control 专属** Access Application，配置 GitHub / Cloudflare 登录、管理员 Allow/MFA，取得 Team Domain 和 Application AUD。
-2. Cloudflare Workers & Pages → GitHub，选择 lwhx/SSH-Manager、main，Worker 名为 ssh-manager-staging。**Build command 留空、Deploy command 填 npm run cf:deploy、Preview command 填 npm run cf:preview:skip。**
+2. Cloudflare Workers & Pages → GitHub，选择 lwhx/SSH-Manager、main，Worker 名为 ssh-manager（D1 仍为 ssh-manager-staging）。**Build command 留空、Deploy command 填 npm run cf:deploy、Preview command 填 npm run cf:preview:skip。**
 3. 添加四个 Build variables：SSH_MANAGER_BASE_DOMAIN（如 whks.de）、SSH_MANAGER_ACCESS_TEAM_DOMAIN、SSH_MANAGER_ACCESS_AUD、SSH_MANAGER_OWNER_EMAIL；点击 Save and Deploy。
 
 第一次构建自动创建 Staging D1、命令签名密钥、一个 Worker 和两个 Custom Domains（ssh-staging / agent-staging），以后 GitHub main 自动更新并保留数据与密钥。若默认 Build API Token 缺乏 D1 权限，需要在 Cloudflare Builds 选择包含 Workers Scripts/Routes 与 D1 Read/Edit 的受限 API Token。
@@ -31,6 +31,15 @@
 仍支持本地 PowerShell 备用方案：npm install → npx wrangler login → npm run cf:quick。
 
 > Cloudflare Workers Builds 名称错位导致签名私钥上传到另一 Worker 时，请勿删除已创建的 D1。修复请查看 [签名密钥安全恢复指南](docs/CLOUDFLARE_SPLIT_SIGNER_RECOVERY.md)。
+
+
+## Linux VPS Agent 安装与配对（Staging）
+
+管理端部署成功不等于 VPS 已连接。**进入「VPS 管理」→ 选中 WAITING_PAIR 节点**，面板会显示 **Agent 安装与配对** 向导：复制绑定了当前 Worker Git commit 的安装命令到 Debian/Ubuntu systemd 测试 VPS；安装器自动构建并启动非 root Agent，完成配对时从交互终端读取十分钟一次性令牌（不出现在命令行/日志）。Token 过期可以在同一节点点击「重新生成配对令牌」，无需删除节点。
+
+本向导只完成 Agent 设备注册、心跳、WSS/HTTPS 通讯；Root Helper 的配置、SSH 公钥修改及可信认证证明仍按 [P3 实机 Runbook](docs/P3_STAGING_LIVE_RUNBOOK.md) **人工逐台验收**，不能用生产 VPS 直接测试。安装脚本需要 curl、tar、Go 1.23+。
+
+[Staging 安装器详细说明](docs/AGENT_STAGING_INSTALL.md)
 
 ## 核心安全约束
 

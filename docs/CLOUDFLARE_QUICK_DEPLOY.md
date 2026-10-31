@@ -32,7 +32,7 @@
 | --- | --- |
 | GitHub 仓库 | lwhx/SSH-Manager |
 | 分支 | main |
-| Worker 名称 | **ssh-manager-staging**（必须精确一致） |
+| Worker 名称 | **ssh-manager**（当前已连接的 Cloudflare Worker；D1 仍为 ssh-manager-staging） |
 | Root directory | 仓库根目录 / |
 | Build command | 留空 |
 | Deploy command | **npm run cf:deploy** |
