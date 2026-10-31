@@ -77,7 +77,7 @@ function seedSql(devicePublic,rootPublic){
   insert("node_ssh_proof_keys",["node_id","public_key","fingerprint","approved_by","created_at"],
    [id.node,rootPublic,"SHA256:local-fixture",id.actor,t-60]),
   op(id.op,id.verify),op(id.op2,id.verify2),
-  challenge(id.verify),challenge(id.verify2)
+  challenge(id.verify)
  ].join("\n");
 }
 async function signedRequest(url,payload,deviceKey){
@@ -206,6 +206,14 @@ async function main(){
  assert(rows[0].verified_at>0);
  assert.equal(rows[0].audit_count,2,"One prepare + one root proof, no duplicate audit");
 
+ // The schema correctly allows only ONE PENDING SSH challenge per VPS.
+ // Create the second challenge only after the first is VERIFIED; this also
+ // tests that a successful proof permits the next manual verification.
+ d1(["--command",insert("ssh_verifications",[
+  "id","node_id","key_fingerprint","login_user","config_revision",
+  "nonce_hash","status","created_at","expires_at","public_key_id","issued_by"
+ ],[id.verify2,id.node,fingerprint,"root",rev,nonceHash,
+   "PENDING",t-5,t+300,id.key,id.actor])]);
  // Simulate D1 audit insertion failure while a second helper prepare report
  // arrives. The Worker must not leave operations SUCCEEDED without
  // ssh_verifications.prepared_at.
