@@ -127,8 +127,7 @@ func TestUnconfirmedRootWriteNeverBecomesSucceededOrFailed(t *testing.T){
  stop()
  review:=filepath.Join(a.config.StateDir,"operations",cmd.ID+".review")
  content,err:=os.ReadFile(review)
- if err!=nil||string(content)!="UNCONFIRMED
-"{
+ if err!=nil||string(content)!="UNCONFIRMED\n"{
   t.Fatalf("incomplete root journal was not flagged for manual review: %q %v",content,err)
  }
  if _,err=os.Stat(filepath.Join(a.config.StateDir,"reports",cmd.ID+".json"));!errors.Is(err,os.ErrNotExist){
