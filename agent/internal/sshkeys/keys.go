@@ -95,7 +95,16 @@ func maybeChown(fd,uid,gid int)error{
 // that exact path as effective, check target user, and verify signed command.
 // No caller should expose this function as a generic file-write API.
 func InstallDaily(home string,uid,gid int,publicKey,snapshotDir string)(Result,error){
+ return InstallManaged(home,uid,gid,publicKey,snapshotDir,"daily")
+}
+func InstallRescue(home string,uid,gid int,publicKey,snapshotDir string)(Result,error){
+ return InstallManaged(home,uid,gid,publicKey,snapshotDir,"rescue")
+}
+// InstallManaged only appends one precisely labelled SSH Manager public key.
+// The rescue key is never installed just because it exists in Cloudflare.
+func InstallManaged(home string,uid,gid int,publicKey,snapshotDir,purpose string)(Result,error){
  var result Result
+ if purpose!="daily"&&purpose!="rescue"{return result,errors.New("unsupported managed key purpose")}
  normalized,fingerprint,err:=NormalizeED25519(publicKey)
  if err!=nil{return result,err}
  result.Fingerprint=fingerprint
@@ -161,7 +170,7 @@ func InstallDaily(home string,uid,gid int,publicKey,snapshotDir string)(Result,e
  result.SnapshotRef=ref
  suffix:=""
  if len(before)>0&&before[len(before)-1]!='\n'{suffix="\n"}
- data:=[]byte(suffix+normalized+" ssh-manager-daily\n")
+ data:=[]byte(suffix+normalized+" ssh-manager-"+purpose+"\n")
  n,err:=f.Write(data)
  if err!=nil||n!=len(data){return result,fmt.Errorf("authorized_keys partial append (%d/%d): %w",n,len(data),err)}
  if err=f.Sync();err!=nil{return result,err}
@@ -200,4 +209,81 @@ func snapshotAuthorizedKeys(dir string,prior []byte,stat syscall.Stat_t,created 
  defer d.Close()
  if err=d.Sync();err!=nil{return "",err}
  return id,nil
+}
+
+// RevokeRescue only deletes an EXACT ssh-manager-rescue line for this public
+// key; it never deletes arbitrary authorized_keys entries or all rescue keys.
+// Snapshot is durable before a same-directory atomic file replacement.
+func RevokeRescue(home string,uid,gid int,publicKey,snapshotDir string)(Result,error){
+ var result Result
+ normalized,fingerprint,err:=NormalizeED25519(publicKey)
+ if err!=nil{return result,err}
+ result.Fingerprint=fingerprint
+ if !filepath.IsAbs(home)||filepath.Clean(home)!=home||home=="/"||
+  !filepath.IsAbs(snapshotDir){return result,errors.New("unsafe rescue revoke paths")}
+ homeFD,err:=openHome(home,uid)
+ if err!=nil{return result,err}
+ defer syscall.Close(homeFD)
+ if err=checkedDir(homeFD,uid);err!=nil{return result,err}
+ sshFD,err:=syscall.Openat(homeFD,".ssh",syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
+ if err!=nil{return result,err}
+ defer syscall.Close(sshFD)
+ if err=checkedDir(sshFD,uid);err!=nil{return result,err}
+ fd,err:=syscall.Openat(sshFD,"authorized_keys",syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
+ if err!=nil{return result,err}
+ f:=os.NewFile(uintptr(fd),"authorized_keys")
+ defer f.Close()
+ if err=syscall.Flock(fd,syscall.LOCK_EX);err!=nil{return result,err}
+ defer syscall.Flock(fd,syscall.LOCK_UN)
+ var st syscall.Stat_t
+ if err=syscall.Fstat(fd,&st);err!=nil{return result,err}
+ if st.Mode&syscall.S_IFMT!=syscall.S_IFREG||
+  (st.Uid!=uint32(uid)&&st.Uid!=0)||st.Mode&0022!=0||st.Size>maxAuthKeysSize{
+  return result,errors.New("unsafe authorized_keys for rescue revoke")
+ }
+ before,err:=io.ReadAll(io.LimitReader(f,maxAuthKeysSize+1))
+ if err!=nil||len(before)>maxAuthKeysSize{return result,errors.New("authorized_keys read limit exceeded")}
+ beforeSum:=sha256.Sum256(before)
+ result.BeforeSHA256=hex.EncodeToString(beforeSum[:])
+ target:=[]byte(normalized+" ssh-manager-rescue")
+ lines:=bytes.SplitAfter(before,[]byte("\n"))
+ var after []byte
+ found:=0
+ for _,line:=range lines{
+  if bytes.Equal(bytes.TrimSuffix(line,[]byte("\n")),target){
+   found++
+   continue
+  }
+  after=append(after,line...)
+ }
+ if found!=1{return result,errors.New("expected exactly one SSH Manager rescue key line")}
+ ref,err:=snapshotAuthorizedKeys(snapshotDir,before,st,false)
+ if err!=nil{return result,err}
+ result.SnapshotRef=ref
+ random:=make([]byte,16);if _,err=rand.Read(random);err!=nil{return result,err}
+ tmpName:=".ssh-manager-revoke-"+hex.EncodeToString(random)
+ tmpFD,err:=syscall.Openat(sshFD,tmpName,syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0600)
+ if err!=nil{return result,err}
+ defer syscall.Unlinkat(sshFD,tmpName)
+ tmp:=os.NewFile(uintptr(tmpFD),tmpName)
+ if err=maybeChown(tmpFD,uid,gid);err!=nil{_ = tmp.Close();return result,err}
+ if err=tmp.Chmod(os.FileMode(st.Mode&0777));err!=nil{_ = tmp.Close();return result,err}
+ n,err:=tmp.Write(after)
+ if err!=nil||n!=len(after){_ = tmp.Close();return result,errors.New("rescue revoke temp write incomplete")}
+ if err=tmp.Sync();err!=nil{_ = tmp.Close();return result,err}
+ if err=tmp.Close();err!=nil{return result,err}
+ // Reject a replacement of the original file before our atomic rename.
+ checkFD,err:=syscall.Openat(sshFD,"authorized_keys",syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
+ if err!=nil{return result,err}
+ var check syscall.Stat_t
+ err=syscall.Fstat(checkFD,&check);syscall.Close(checkFD)
+ if err!=nil||check.Ino!=st.Ino||check.Dev!=st.Dev||check.Size!=st.Size{
+  return result,errors.New("authorized_keys changed during rescue revocation")
+ }
+ if err=syscall.Renameat(sshFD,tmpName,sshFD,"authorized_keys");err!=nil{return result,err}
+ if err=syscall.Fsync(sshFD);err!=nil{return result,err}
+ checksum:=sha256.Sum256(after)
+ result.AfterSHA256=hex.EncodeToString(checksum[:])
+ result.FileChecked=true
+ return result,nil
 }
