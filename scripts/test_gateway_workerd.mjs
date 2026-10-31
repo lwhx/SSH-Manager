@@ -46,18 +46,20 @@ function insert(table,columns,values){
  return "INSERT INTO "+table+"("+columns.join(",")+") VALUES ("+
    values.map(v=>v===null?"NULL":typeof v==="number"?String(v):q(v)).join(",")+");";
 }
-function seedSql(devicePublic,rootPublic){
- const cmd=(operation,verification)=>JSON.stringify({
+function verificationPrepareOp(operation,verification){
+ const command=JSON.stringify({
   v:1,id:operation,node_id:id.node,action:"ssh.verification.prepare",
   actor:id.actor,expected_revision:rev,
   payload:{verification_id:verification,nonce_hash:nonceHash,login_user:"root",
    fingerprint,key_id:id.key,config_revision:rev}
  });
- const op=(operation,verification)=>insert("operations",[
+ return insert("operations",[
   "id","node_id","action","operator_id","idempotency_key","expected_revision",
   "command_json","signature","status","created_at","expires_at"
  ],[operation,id.node,"ssh.verification.prepare",id.actor,"prepare-"+verification,
-  rev,cmd(operation,verification),"fixture-signer","DISPATCHED",t-5,t+300]);
+  rev,command,"fixture-signer","DISPATCHED",t-5,t+300]);
+}
+function seedSql(devicePublic,rootPublic){
  const challenge=(verification)=>insert("ssh_verifications",[
   "id","node_id","key_fingerprint","login_user","config_revision",
   "nonce_hash","status","created_at","expires_at","public_key_id","issued_by"
@@ -76,7 +78,8 @@ function seedSql(devicePublic,rootPublic){
    [id.keyRow,id.node,id.key,"root","daily","installed"]),
   insert("node_ssh_proof_keys",["node_id","public_key","fingerprint","approved_by","created_at"],
    [id.node,rootPublic,"SHA256:local-fixture",id.actor,t-60]),
-  op(id.op,id.verify),op(id.op2,id.verify2),
+  // The second operation is inserted only after the first terminal result.
+  verificationPrepareOp(id.op,id.verify),
   challenge(id.verify)
  ].join("\n");
 }
@@ -231,6 +234,9 @@ async function main(){
   "nonce_hash","status","created_at","expires_at","public_key_id","issued_by"
  ],[id.verify2,id.node,fingerprint,"root",rev,nonceHash,
    "PENDING",t-5,t+300,id.key,id.actor])]);
+ // The previous operation has a terminal result, so the next can be
+ // dispatched without violating per-node single-flight.
+ d1(["--command",verificationPrepareOp(id.op2,id.verify2)]);
  // Simulate D1 audit insertion failure while a second helper prepare report
  // arrives. The Worker must not leave operations SUCCEEDED without
  // ssh_verifications.prepared_at.
@@ -316,6 +322,17 @@ async function main(){
   "invalid snapshot must abort the full D1 transaction");
  assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
   "DISPATCHED","D1 committed failed snapshot transition");
+ // Local fixture only: the synthetic bad snapshot did not perform an SSH
+ // write. Submit an explicit terminal failure instead of silently expiring
+ // an ambiguous DISPATCHED operation to unlock the next test case.
+ const terminated=await send("/agent/v1/report",{
+  operation_id:special.badRestore,status:"FAILED",
+  result_code:"ROOT_OPERATION_FAILED",
+  detail:{reason:"test fixture rejected snapshot; no SSH side effect"}
+ },device);
+ assert.equal(terminated.status,200,JSON.stringify(terminated.json));
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
+  "FAILED","explicit failure should close the synthetic fixture only");
  const restore=addManual(special.restore,"ssh.password.restore",changedRev,
   {snapshot_ref:snapshot});
  const restoreReport=await rootTerminal(restore,"PASSWORD_POLICY_RESTORED",{
