@@ -13,7 +13,7 @@ jobs:
       - run: cd agent && go vet ./...
       - run: cd agent && go build ./cmd/ssh-manager-helper
       - run: cd agent && go build ./cmd/ssh-manager-prove
-      - run: cd agent && sudo -E "$(command -v go)" test -run TestRootProofSessionSignedAndConsumedOnce -count=1 -v ./internal/sshhelper
+      - run: cd agent && sudo -E "$(command -v go)" test -run "TestRootProofSessionSignedAndConsumedOnce|TestRootQuarantine|TestOutboxQuarantine" -count=1 -v ./internal/sshhelper
   control:
     runs-on: ubuntu-latest
     steps:
