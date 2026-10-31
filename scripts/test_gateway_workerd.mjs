@@ -138,7 +138,7 @@ async function main(){
  cfg.vars.COMMAND_PUBLIC_KEY=devicePublic;
  fs.writeFileSync(configFile,JSON.stringify(cfg,null,2),{mode:0o600});
  cli(["d1","migrations","apply","ssh-manager","--config",configFile,
-   "--local","--persist-to",state,"--yes"]);
+   "--local","--persist-to",state]);
  fs.writeFileSync(seedFile,seedSql(devicePublic,rootPublic),{mode:0o600});
  d1(["--file",seedFile]);
  worker=spawn(wrangler,["dev","--config",configFile,"--local","--port","8799",
