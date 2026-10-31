@@ -237,6 +237,103 @@ async function main(){
   ") AS prepared_at");
  assert.equal(rows[0].operation_status,"SUCCEEDED");
  assert(rows[0].prepared_at>0);
+ 
+ // P4/P5: exercise the ACTUAL local Gateway and D1 with a per-node Root
+ // operation receipt (the Agent only transports it, never signs it).
+ const special={
+  disable:"a0000000-0000-4000-8000-000000000001",
+  restore:"a0000000-0000-4000-8000-000000000002",
+  rescue:"a0000000-0000-4000-8000-000000000003",
+  revoke:"a0000000-0000-4000-8000-000000000004",
+  badRestore:"a0000000-0000-4000-8000-000000000005",
+  rescueKey:"b0000000-0000-4000-8000-000000000001"
+ };
+ const changedRev="c".repeat(64),restoredRev="d".repeat(64);
+ const snapshot="e".repeat(32),rescueFP="SHA256:"+"B".repeat(43);
+ function addManual(op,action,revision,extra){
+  const tick=Math.floor(Date.now()/1000);
+  const command={v:1,id:op,node_id:id.node,actor:id.actor,action,
+   issued_at:tick-5,expires_at:tick+45,expected_revision:revision,
+   payload:{login_user:"root",confirm_node_id:id.node,
+    reason:"Administrator explicitly approved isolated staging operation",...extra}};
+  d1(["--command",insert("operations",[
+   "id","node_id","action","operator_id","idempotency_key","expected_revision",
+   "command_json","signature","status","created_at","expires_at"
+  ],[op,id.node,action,id.actor,"staging-"+op,revision,JSON.stringify(command),
+    "signed-command-fixture","DISPATCHED",tick-5,tick+45])]);
+  return command;
+ }
+ async function rootTerminal(command,resultCode,result){
+  const receipt={v:1,node_id:id.node,operation_id:command.id,
+   action:command.action,result_code:resultCode,
+   expected_revision:command.expected_revision,
+   detail_sha256:createHash("sha256").update(JSON.stringify(result)).digest("hex"),
+   executed_at:command.issued_at+5};
+  const payload=JSON.stringify(receipt);
+  return {operation_id:command.id,status:"SUCCEEDED",result_code:resultCode,
+   detail:{result,root_receipt:{payload,
+    signature:toURL(await webcrypto.subtle.sign("Ed25519",rootKey.privateKey,
+      new TextEncoder().encode(payload)))}}};
+ }
+ const disable=addManual(special.disable,"ssh.password.disable",rev,
+  {verification_id:id.verify,proof_id:id.proof});
+ const disabledData={snapshot_ref:snapshot,before_revision:rev,after_revision:changedRev,
+  config_hash:"f".repeat(64),passwordauthentication:false,kbdinteractiveauthentication:false};
+ const disableReport=await rootTerminal(disable,"PASSWORD_DISABLED",disabledData);
+ expectCode(await send("/agent/v1/report",{
+  ...disableReport,detail:{result:disabledData}
+ },device),403,"ROOT_MANUAL_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.disable))[0].status,
+  "DISPATCHED","untrusted Agent success mutated D1");
+ assert.equal((await send("/agent/v1/report",disableReport,device)).status,200);
+ let manualRows=query("SELECT init_stage,config_revision FROM nodes WHERE id="+q(id.node));
+ assert.equal(manualRows[0].init_stage,"PASSWORD_DISABLED");
+ assert.equal(manualRows[0].config_revision,changedRev);
+ assert.equal(query("SELECT count(*) AS n FROM ssh_config_snapshots WHERE node_id="+q(id.node))[0].n,1);
+ const invalid=addManual(special.badRestore,"ssh.config.rollback",changedRev,
+  {snapshot_ref:"1".repeat(32)});
+ const invalidReport=await rootTerminal(invalid,"SSH_CONFIG_ROLLED_BACK",{
+  snapshot_ref:"1".repeat(32),before_revision:changedRev,after_revision:restoredRev,
+  config_hash:rev,passwordauthentication:true,kbdinteractiveauthentication:true});
+ assert.equal((await send("/agent/v1/report",invalidReport,device)).status,500,
+  "invalid snapshot must abort the full D1 transaction");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
+  "DISPATCHED","D1 committed failed snapshot transition");
+ const restore=addManual(special.restore,"ssh.password.restore",changedRev,
+  {snapshot_ref:snapshot});
+ const restoreReport=await rootTerminal(restore,"PASSWORD_POLICY_RESTORED",{
+  snapshot_ref:snapshot,before_revision:changedRev,after_revision:restoredRev,
+  config_hash:rev,passwordauthentication:true,kbdinteractiveauthentication:true});
+ assert.equal((await send("/agent/v1/report",restoreReport,device)).status,200);
+ manualRows=query("SELECT init_stage,config_revision FROM nodes WHERE id="+q(id.node));
+ assert.equal(manualRows[0].init_stage,"POLICY_INSPECTED");
+ assert.equal(manualRows[0].config_revision,restoredRev);
+ const restored=query("SELECT restored_at FROM ssh_config_snapshots WHERE node_id="+q(id.node));
+ assert(restored[0].restored_at>0);
+ d1(["--command",insert("public_keys",[
+  "id","purpose","name","algorithm","public_key","fingerprint",
+  "version","created_by","created_at"
+ ],[special.rescueKey,"rescue","test","ssh-ed25519",
+  "ssh-ed25519 fixture",rescueFP,1,id.actor,Math.floor(Date.now()/1000)])]);
+ const rescue=addManual(special.rescue,"ssh.rescue.enable",restoredRev,
+  {key_id:special.rescueKey,fingerprint:rescueFP,public_key:"ssh-ed25519 fixture"});
+ const enableResult={key_fingerprint:rescueFP,file_checked:true,
+  before_sha256:"2".repeat(64),after_sha256:"3".repeat(64),
+  snapshot_ref:"4".repeat(32),already_present:false};
+ const enabled=await send("/agent/v1/report",
+  await rootTerminal(rescue,"RESCUE_KEY_INSTALLED",enableResult),device);
+ assert.equal(enabled.status,200,JSON.stringify(enabled.json));
+ assert.equal(query("SELECT state FROM node_keys WHERE public_key_id="+q(special.rescueKey))[0].state,"installed");
+ const revoke=addManual(special.revoke,"ssh.rescue.revoke",restoredRev,
+  {key_id:special.rescueKey,fingerprint:rescueFP,public_key:"ssh-ed25519 fixture"});
+ const revokeResult={key_fingerprint:rescueFP,file_checked:true,
+  before_sha256:"3".repeat(64),after_sha256:"2".repeat(64),snapshot_ref:"5".repeat(32)};
+ const revoked=await send("/agent/v1/report",
+  await rootTerminal(revoke,"RESCUE_KEY_REVOKED",revokeResult),device);
+ assert.equal(revoked.status,200,JSON.stringify(revoked.json));
+ assert.equal(query("SELECT state FROM node_keys WHERE public_key_id="+q(special.rescueKey))[0].state,"revoked");
+ console.log("PASS local workerd+D1 P4/P5: signed manual receipt required, "+
+  "atomic password restore, snapshot guard, single-node rescue enable/revoke");
  console.log("PASS local workerd+D1: device signature, nonce replay, Root Ed25519 "+
   "proof, idempotence and audit-failure rollback (NO remote VPS/Cloudflare)");
 }
