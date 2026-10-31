@@ -106,14 +106,35 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       .bind(status,String(b.result_code||"").slice(0,64),detail,status==="RUNNING"?null:now(),opId,id,...allowed).run();
     must(changes.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
     if(status==="SUCCEEDED"&&op.action==="ssh.policy.inspect"&&plain(b.detail)){
-      await env.DB.prepare("UPDATE nodes SET config_revision=?,init_stage='POLICY_INSPECTED' WHERE id=?")
-        .bind(b.detail.revision,id).run();
+      const previous=await env.DB.prepare("SELECT config_revision,init_stage FROM nodes WHERE id=?")
+        .bind(id).first<{config_revision:string;init_stage:string}>();
+      must(previous,"NODE_NOT_FOUND",404);
+      const revision=String(b.detail.revision);
+      // A repeated inspection of the SAME policy must not erase a successful
+      // daily-key install or strand an already issued challenge.
+      const preserve=previous.init_stage==="WAITING_VERIFICATION"&&previous.config_revision===revision;
+      const steps=[
+        env.DB.prepare("UPDATE nodes SET config_revision=?,init_stage=? WHERE id=?")
+          .bind(revision,preserve?"WAITING_VERIFICATION":"POLICY_INSPECTED",id)
+      ];
+      if(previous.config_revision!==revision){
+        steps.push(env.DB.prepare(
+          "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
+          "WHERE node_id=? AND status='PENDING'"
+        ).bind(now(),id));
+      }
+      await env.DB.batch(steps);
     }
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
       const c=JSON.parse(op.command_json);
-      await env.DB.prepare("INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) VALUES (?,?,?,?,'daily','installed')")
-        .bind(crypto.randomUUID(),id,c.payload.key_id,c.payload.login_user).run();
-      await env.DB.prepare("UPDATE nodes SET init_stage='WAITING_VERIFICATION' WHERE id=?").bind(id).run();
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) VALUES (?,?,?,?,'daily','installed')")
+          .bind(crypto.randomUUID(),id,c.payload.key_id,c.payload.login_user),
+        env.DB.prepare("UPDATE nodes SET init_stage='WAITING_VERIFICATION' WHERE id=?").bind(id),
+        // A new installation changes the challenge's security context.
+        env.DB.prepare("UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE node_id=? AND status='PENDING'")
+          .bind(now(),id)
+      ]);
     }
     if(status!=="RUNNING"){
       await env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,?,?,?,?,?,?)")
