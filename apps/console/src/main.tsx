@@ -7,13 +7,15 @@ import NodeDirectory from "./NodeDirectory";
 import AddNodeWizard,{type NewNodeDraft,type WizardNode,type WizardPair} from "./AddNodeWizard";
 import NodeSettings,{type NodeSettingsInput} from "./NodeSettings";
 import TaskCenter from "./TaskCenter";
+import VerificationPanel from "./VerificationPanel";
+import NodeSecurityActions from "./NodeSecurityActions";
 import {parseConsoleRoute,consoleRouteHref,consoleNodeTabHref,parseNodeDetailTab,type ConsolePage,type NodeDetailTab} from "./nodeNavigation";
 import {isNodeOnline} from "./nodeDisplay";
 type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:string;status:string;init_stage:string;last_seen_at?:number;config_revision:string;group_name?:string;notes?:string;created_at?:number;agent_version?:string;os_id?:string};
 type MeInfo={email:string;role:string;manual_ssh_actions_enabled:boolean;agent_gateway_url:string};
 type PairInfo={node_id:string;token:string;expires_at:number};
 type KeyInfo={id:string;purpose:string;fingerprint:string;public_key:string;version:number;name:string};
-type VerificationInfo={id:string;status:string;expires_at:number;fingerprint:string;login_user:string;token?:string;prepared_at?:number|null};
+type VerificationInfo={node_id:string;id:string;status:string;expires_at:number;fingerprint:string;login_user:string;token?:string;prepared_at?:number|null};
 async function api<T>(path:string,method="GET",data?:unknown,headers?:Record<string,string>):Promise<T>{
  const res=await fetch("/api/v1"+path,{method,headers:{"Content-Type":"application/json",...headers},body:data?JSON.stringify(data):undefined,credentials:"same-origin"});
  const result:any=await res.json();
@@ -78,7 +80,7 @@ function App(){
  },[selected?.id,me?.role]);
 
  useEffect(()=>{
-  if(!selected||!verification||verification.status!=="PENDING")return;
+  if(!selected||!verification||verification.node_id!==selected.id||verification.status!=="PENDING")return;
   let running=true;
   const update=async()=>{
    try{
@@ -187,14 +189,14 @@ function App(){
     verification_id:string;token:string;expires_at:number;
     login_user:string;fingerprint:string;status:string;trusted_proof_available:boolean;preparation_operation_id:string;
    }>("/nodes/"+node.id+"/ssh-verification/start","POST",{});
-   setVerification({id:result.verification_id,status:result.status,expires_at:result.expires_at,
+   setVerification({node_id:node.id,id:result.verification_id,status:result.status,expires_at:result.expires_at,
      login_user:result.login_user,fingerprint:result.fingerprint,token:result.token,prepared_at:null});
    setOperation(result.preparation_operation_id);setOperationState(null);
    setMessage("挑战已签发，正在请求当前 VPS 的 Root Helper 本地准备；这不代表 SSH 登录验证成功。");
   });
  }
  async function cancelVerification(node:NodeInfo){
-  if(!verification)return;
+  if(!verification||verification.node_id!==node.id)return;
   await act(async()=>{
    await api("/nodes/"+node.id+"/ssh-verification/"+verification.id+"/cancel","POST",{});
    setVerification(previous=>previous?{...previous,status:"CANCELLED"}:null);
@@ -258,7 +260,10 @@ function App(){
 
   </section>}
   {detailTab==="ssh"&&<section className="card"><h3>本 VPS 的 SSH 安全</h3>
- <button disabled={busy||selected.status!=="online"} onClick={()=>void preflight(selected)}>执行 SSH 只读环境检查</button><button disabled={busy||selected.status!=="online"} onClick={()=>void inspectPolicy(selected)}>检查 SSH 实际生效配置（Helper）</button><button disabled={busy||selected.status!=="online"||selected.config_revision==="unverified"||!keys.some(k=>k.purpose==="daily")} onClick={()=>void installDaily(selected)}>部署日常公钥（不关闭密码）</button><hr/><h4>本台 VPS 的可信 Root Helper</h4>
+ <NodeSecurityActions online={isNodeOnline(selected)} busy={busy} canManage={me.role!=="viewer"}
+   revisionReady={selected.config_revision!=="unverified"} hasDailyKey={keys.some(k=>k.purpose==="daily")}
+   onPreflight={()=>void preflight(selected)} onInspect={()=>void inspectPolicy(selected)}
+   onInstallDaily={()=>void installDaily(selected)}/><hr/><h4>本台 VPS 的可信 Root Helper</h4>
  {pinnedRootProof?<p>已绑定本机证明密钥指纹：<code>{pinnedRootProof.fingerprint}</code>（不可由 Agent 直接更换）</p>:
  <div className="hint"><p>Root Helper 证明公钥尚未绑定。先在该 VPS 本机手动生成并核对签名公钥，再由 Owner 绑定到本节点。</p>
  {owner&&<>
@@ -268,19 +273,10 @@ function App(){
  </>}
  </div>}
  <hr/><h4>SSH 日常密钥登录验证</h4><p>先安装日常公钥，再为当前节点生成一次性挑战。<strong>挑战不代表验证成功</strong>：服务器侧认证证据链已经实现，但尚未完成真实 VPS + Cloudflare Staging 全链路验收。</p>
- <button disabled={busy||selected.status!=="online"||selected.init_stage!=="WAITING_VERIFICATION"||!pinnedRootProof||(verification?.status==="PENDING")}
+ <button disabled={busy||me.role==="viewer"||!isNodeOnline(selected)||selected.init_stage!=="WAITING_VERIFICATION"||!pinnedRootProof||(verification?.node_id===selected.id&&verification.status==="PENDING")}
   onClick={()=>void beginVerification(selected)}>生成单节点验证挑战（5分钟）</button>
- {verification&&<div className="hint">
-  <strong>验证任务：{verification.status}</strong>
-  <p>VPS 本机挑战准备：{verification.prepared_at?"已确认准备完成":"尚未收到成功回执"}</p>
-  <p>对应用户：{verification.login_user}</p>
-  <p>目标公钥：{verification.fingerprint}</p>
-  <p>到期：{new Date(verification.expires_at*1000).toLocaleString()}</p>
-  {verification.token&&verification.status==="PENDING"&&<><p>一次性挑战（只在首次显示）：</p><code>{verification.token}</code></>}
-  <p>{verification.status==="VERIFIED"?"控制端已接受当前节点的 Root Helper 签名认证证明。仍不自动关闭密码登录。":"只有经本机真实公钥认证、可信证明并通过 Cloudflare 验签，才会进入 VERIFIED。不要凭手工点击认定成功。"}</p>
-  {verification.status==="PENDING"&&<button className="secondary" disabled={busy}
-    onClick={()=>void cancelVerification(selected)}>撤销本次挑战</button>}
- </div>}
+ <VerificationPanel nodeId={selected.id} verification={verification} canManage={me.role!=="viewer"} busy={busy}
+  onCancel={()=>void cancelVerification(selected)}/>
  <ManualOperations key={selected.id} node={selected} owner={owner} enabled={!!me.manual_ssh_actions_enabled}
     rescueKeyAvailable={keys.some(k=>k.purpose==="rescue")}
     onOperation={id=>{setOperation(id);setOperationState(null);}}/>{operation&&<div className="hint"><p>任务 ID：{operation}</p><p>实际状态：{operationState?.status||"等待 Agent"} · {operationState?.result_code||""}</p>{operationState?.detail&&<pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{operationState.detail}</pre>}<small>配置检查不能代替可信 SSH 登录验证；安装日常公钥不会关闭密码登录。</small></div>}
