@@ -6,11 +6,9 @@ import (
  "crypto/ed25519"
  "crypto/rand"
  "crypto/sha256"
- "crypto/x509"
  "encoding/base64"
  "encoding/hex"
  "encoding/json"
- "encoding/pem"
  "errors"
  "flag"
  "fmt"
@@ -30,6 +28,7 @@ type Config struct {
  NodeID string `json:"node_id"`
  DeviceKey string `json:"device_key"`
  CommandPublicKey string `json:"command_public_key"`
+ StateDir string `json:"state_dir"`
 }
 type Command struct {
  V int `json:"v"`
@@ -83,7 +82,7 @@ func (a *Agent) verify(s SignedCommand)(Command,error){
  if len(pub)!=ed25519.PublicKeySize||!ed25519.Verify(ed25519.PublicKey(pub),[]byte(s.Command),sig){return c,errors.New("invalid control signature")}
  if err=json.Unmarshal([]byte(s.Command),&c);err!=nil{return c,err}
  now:=time.Now().Unix()
- if c.NodeID!=a.config.NodeID||c.V!=1||c.ID==""||c.IssuedAt>now+10||c.ExpiresAt<=now||c.ExpiresAt>c.IssuedAt+60 {return c,errors.New("invalid or expired command")}
+ if c.NodeID!=a.config.NodeID||c.V!=1||!operationID.MatchString(c.ID)||c.IssuedAt>now+10||c.ExpiresAt<=now||c.ExpiresAt>c.IssuedAt+60 {return c,errors.New("invalid or expired command")}
  if c.Action!="node.preflight"&&c.Action!="node.status"&&c.Action!="ssh.daily.install"{return c,errors.New("action not allowed")}
  return c,nil
 }
@@ -93,17 +92,26 @@ func report(a *Agent,ctx context.Context,id,status,code string,detail any){
 }
 func (a *Agent) handle(ctx context.Context,s SignedCommand){
  c,err:=a.verify(s);if err!=nil{log.Printf("rejected command: %v",err);return}
- // Never perform privileged SSH file changes from this unprivileged transport agent.
- // The SSH helper, trusted login proof, and snapshot validation must land first.
- if c.Action=="ssh.daily.install"{
-   report(a,ctx,c.ID,"FAILED","SSH_HELPER_NOT_IMPLEMENTED",map[string]string{"message":"SSH write deliberately locked pending privileged helper validation"})
-   return
+ if err:=a.claimOperation(c);err!=nil{
+  log.Printf("blocked duplicate/unsafe operation %s: %v",c.ID,err)
+  return
  }
- report(a,ctx,c.ID,"SUCCEEDED","READ_ONLY_OK",map[string]string{"action":c.Action})
+ switch c.Action{
+ case "ssh.daily.install":
+  // Deliberate safety lock: the independent privileged SSH helper is not ready.
+  report(a,ctx,c.ID,"FAILED","SSH_HELPER_NOT_IMPLEMENTED",map[string]string{"message":"SSH write disabled until privileged helper and login verification are audited"})
+ case "node.preflight":
+  report(a,ctx,c.ID,"SUCCEEDED","READ_ONLY_DIAGNOSTIC",readOnlyPreflight())
+ case "node.status":
+  report(a,ctx,c.ID,"SUCCEEDED","TRANSPORT_ALIVE",map[string]string{"agent_version":"0.2.0"})
+ default:
+  report(a,ctx,c.ID,"FAILED","ACTION_NOT_SUPPORTED",nil)
+ }
 }
 func run(ctx context.Context,path string)error {
  c,key,err:=readConfig(path);if err!=nil{return err}
  a:=&Agent{config:c,secret:key,http:&http.Client{Timeout:12*time.Second}}
+ go a.websocketLoop(ctx)
  ticker:=time.NewTicker(10*time.Second);defer ticker.Stop()
  for {
    select{case <-ctx.Done():return nil;default:}
@@ -157,5 +165,3 @@ func main(){
  default:err=errors.New("unknown mode")}
  if err!=nil{log.Fatal(err)}
 }
-var _ = x509.Certificate{}
-var _ = pem.Block{}
