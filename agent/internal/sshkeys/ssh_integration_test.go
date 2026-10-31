@@ -163,7 +163,7 @@ func TestLocalSSHDIntegration(t *testing.T){
   "-o","ControlPath=none","-o","ConnectTimeout=3",
   "-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+knownHosts,
   "-i",clientKey,username+"@127.0.0.1",
-  "printf 'VERIFY_PID=%s\\n' \"$\"; sleep 5")
+  "printf 'VERIFY_PID=%s\\n' \"$$\"; sleep 5")
  stdout,err:=lineage.StdoutPipe()
  if err!=nil{t.Fatal(err)}
  lineage.Stderr=&lineageErr
