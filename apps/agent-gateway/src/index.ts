@@ -95,7 +95,7 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     must(trusted,"NODE_ROOT_PROOF_KEY_NOT_PINNED",403);
     const challenge=await env.DB.prepare(
       "SELECT id,node_id,public_key_id,login_user,key_fingerprint,config_revision,nonce_hash,"+
-      "status,created_at,expires_at,prepared_at,proof_id,proof_hash FROM ssh_verifications WHERE id=? AND node_id=?"
+      "status,created_at,expires_at,prepared_at,proof_id,proof_hash,issued_by FROM ssh_verifications WHERE id=? AND node_id=?"
     ).bind(String(claim.verification_id),id).first<any>();
     if(challenge?.status==="VERIFIED"&&
        challenge.proof_id===claim.proof_id&&
@@ -134,32 +134,51 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     const hash=await sha256hex(payload);
     // This guarded D1 state transition is the ONLY route to VERIFIED.
     // Replayed proofs and modified node/key/revision/expiry fail closed.
-    const verified=await env.DB.prepare(
-      "UPDATE ssh_verifications SET status='VERIFIED',verified_at=?,proof_id=?,proof_hash=? "+
-      "WHERE id=? AND node_id=? AND status='PENDING' AND prepared_at IS NOT NULL "+
-      "AND expires_at>? AND nonce_hash=? AND login_user=? AND key_fingerprint=? "+
-      "AND config_revision=? AND public_key_id=? "+
-      "AND EXISTS (SELECT 1 FROM nodes WHERE id=? AND login_user=? AND config_revision=? "+
-      "AND init_stage='WAITING_VERIFICATION') "+
-      "AND EXISTS (SELECT 1 FROM public_keys WHERE id=? AND purpose='daily' AND active=1)"
-    ).bind(now(),signed.proof_id,hash,challenge.id,id,now(),
-      challenge.nonce_hash,challenge.login_user,challenge.key_fingerprint,
-      challenge.config_revision,challenge.public_key_id,
-      id,challenge.login_user,challenge.config_revision,challenge.public_key_id).run();
-    must(verified.meta.changes===1,"PROOF_ALREADY_USED_OR_CONTEXT_CHANGED",409);
-    await env.DB.prepare(
-      "UPDATE node_keys SET verified_at=? WHERE node_id=? AND public_key_id=? "+
-      "AND login_user=? AND purpose='daily' AND state='installed'"
-    ).bind(now(),id,challenge.public_key_id,challenge.login_user).run();
-    await env.DB.prepare(
-      "UPDATE nodes SET init_stage='KEY_VERIFIED' WHERE id=? AND init_stage='WAITING_VERIFICATION' "+
-      "AND config_revision=?"
-    ).bind(id,challenge.config_revision).run();
-    await env.DB.prepare(
-      "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
-      "VALUES (?,?,?,'ssh.verification.proof',NULL,'VERIFIED',?,?)"
-    ).bind(crypto.randomUUID(),String(challenge.id),id,
-      "proof_id="+signed.proof_id,now()).run();
+    // D1 batch is transactional. A successful VERIFIED claim must never be
+    // committed without also applying node/key status and a durable audit.
+    // The audit attributes the verification to the human who issued the
+    // challenge; the root-signed Agent proof is identified by proof_id.
+    must(typeof challenge.issued_by==="string"&&challenge.issued_by.length>0,
+      "VERIFICATION_ISSUER_MISSING",409);
+    const t=now();
+    const [verified,keyMarked,nodeMarked,audited]=await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE ssh_verifications SET status='VERIFIED',verified_at=?,proof_id=?,proof_hash=? "+
+        "WHERE id=? AND node_id=? AND status='PENDING' AND prepared_at IS NOT NULL "+
+        "AND expires_at>? AND nonce_hash=? AND login_user=? AND key_fingerprint=? "+
+        "AND config_revision=? AND public_key_id=? "+
+        "AND EXISTS (SELECT 1 FROM nodes WHERE id=? AND login_user=? AND config_revision=? "+
+        "AND init_stage='WAITING_VERIFICATION') "+
+        "AND EXISTS (SELECT 1 FROM public_keys WHERE id=? AND purpose='daily' AND active=1) "+
+        "AND EXISTS (SELECT 1 FROM node_keys WHERE node_id=? AND public_key_id=? "+
+        "AND login_user=? AND purpose='daily' AND state='installed')"
+      ).bind(t,signed.proof_id,hash,challenge.id,id,t,
+        challenge.nonce_hash,challenge.login_user,challenge.key_fingerprint,
+        challenge.config_revision,challenge.public_key_id,
+        id,challenge.login_user,challenge.config_revision,challenge.public_key_id,
+        id,challenge.public_key_id,challenge.login_user),
+      env.DB.prepare(
+        "UPDATE node_keys SET verified_at=COALESCE(verified_at,?) "+
+        "WHERE node_id=? AND public_key_id=? AND login_user=? AND purpose='daily' AND state='installed' "+
+        "AND EXISTS (SELECT 1 FROM ssh_verifications WHERE id=? AND node_id=? "+
+        "AND status='VERIFIED' AND proof_id=?)"
+      ).bind(t,id,challenge.public_key_id,challenge.login_user,challenge.id,id,signed.proof_id),
+      env.DB.prepare(
+        "UPDATE nodes SET init_stage='KEY_VERIFIED' WHERE id=? AND init_stage='WAITING_VERIFICATION' "+
+        "AND config_revision=? AND EXISTS (SELECT 1 FROM ssh_verifications "+
+        "WHERE id=? AND node_id=? AND status='VERIFIED' AND proof_id=?)"
+      ).bind(id,challenge.config_revision,challenge.id,id,signed.proof_id),
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
+        "SELECT ?,?,?,'ssh.verification.proof',NULL,'VERIFIED',?,? "+
+        "WHERE EXISTS (SELECT 1 FROM ssh_verifications WHERE id=? AND node_id=? "+
+        "AND status='VERIFIED' AND proof_id=?)"
+      ).bind(signed.proof_id,challenge.issued_by,id,
+        "root-proof="+signed.proof_id,t,challenge.id,id,signed.proof_id)
+    ]);
+    must(verified.meta.changes===1&&keyMarked.meta.changes>=1&&
+      nodeMarked.meta.changes===1&&audited.meta.changes===1,
+      "ATOMIC_PROOF_TRANSITION_NOT_COMPLETED",409);
     return response({accepted:true,verification_id:challenge.id,status:"VERIFIED"});
   }
   if(p==="/agent/v1/report"){

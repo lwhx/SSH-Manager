@@ -350,7 +350,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
         // Never send nonce_hash or any credentials back from a read endpoint.
         return response({verification:{...verification,
           status:verificationStatus(verification.status,verification.expires_at,now())},
-          trusted_proof_available:false});
+          trusted_proof_available:verification.status==="VERIFIED"});
       }
     }
     if(sub==="snapshots"&&req.method==="GET"){
