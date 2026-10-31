@@ -121,7 +121,7 @@ function initialize(template){
  console.log("Access remains hostname-based: CONTROL ONLY. Never use Worker-level Access.");
  // The classification has already checked that NO staging D1 exists.
  // This is the only command that ever creates a D1 database.
- wrangler(["d1","create",DB]);
+ wrangler(["d1","create",DB,"--no-update-config"]);
  const created=findStagingDatabase(databaseList(),DB);
  if(!created)throw Error("New D1 is not visible. Stop; DO NOT rerun to rotate the signer.");
  const signer=generateCommandSigner();

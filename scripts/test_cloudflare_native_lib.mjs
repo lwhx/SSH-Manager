@@ -123,3 +123,17 @@ test("Wrangler API token credentials are accepted but secrets are not logged",()
  assert.throws(()=>parseWranglerAuthToken({type:"api_key",key, email:"a@example.com"}));
  assert.throws(()=>parseWranglerAuthToken({type:"api_token",token:""}));
 });
+
+test("default root Wrangler config is intentionally inert: cannot expose an unprotected web or Agent endpoint",()=>{
+ const cfg=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
+ assert.equal(cfg.name,"ssh-manager-staging");
+ assert.equal(cfg.workers_dev,false);
+ assert.equal(cfg.preview_urls,false);
+ assert.equal(cfg.assets.run_worker_first,true);
+ assert.equal(cfg.vars.CONTROL_HOSTNAME,cfg.vars.AGENT_HOSTNAME);
+ assert.equal(cfg.vars.MANUAL_SSH_ACTIONS_ENABLED,"false");
+ assert.equal(cfg.d1_databases,undefined);
+ assert.equal(cfg.routes,undefined);
+ assert.equal(cfg.vars.COMMAND_PRIVATE_KEY,undefined);
+ assert.equal(cfg.vars.COMMAND_PUBLIC_KEY,undefined);
+});

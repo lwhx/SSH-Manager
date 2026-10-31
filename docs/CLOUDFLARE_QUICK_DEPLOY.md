@@ -119,3 +119,7 @@ npm run cf:quick
 现在只需输入一个管理域名（Agent 域名自动推导）、Access Team Domain、Application AUD 和 Owner 邮箱；本地一条命令处理 D1、密钥与一个 Worker。更新用 npm run cf:quick。
 
 **两种部署模式只选一种进行日常自动更新**。不要同时开启 GitHub Actions 旧版部署和 Cloudflare Workers Builds。
+
+### Cloudflare 自动检测说明
+
+仓库根目录的 `wrangler.jsonc` 是一个**默认锁闭、不可访问的安全骨架**，用来让 Cloudflare GitHub 导入时识别项目，不会包含 D1、路由或签名密钥。**部署命令必须填写 `npm run cf:deploy`**，因为它会生成真正的单 Worker 配置；直接使用默认 `npx wrangler deploy` 只会部署未配置的锁闭版本。
