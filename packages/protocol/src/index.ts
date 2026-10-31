@@ -35,7 +35,7 @@ export async function sha256hex(input:string):Promise<string>{
  return [...h].map(x=>x.toString(16).padStart(2,"0")).join("");
 }
 export async function sha256urlBytes(input:Uint8Array):Promise<string>{
- return base64url(new Uint8Array(await crypto.subtle.digest("SHA-256",input)));
+ return base64url(new Uint8Array(await crypto.subtle.digest("SHA-256",Uint8Array.from(input))));
 }
 export async function parsePublicKey(value:string):Promise<{algorithm:string;normalized:string;fingerprint:string}>{
  const parts=value.trim().split(/\s+/);
