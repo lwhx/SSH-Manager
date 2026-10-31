@@ -108,3 +108,9 @@ unset TOKEN
 Cloudflare 控制面本身是高价值权限入口：需要 MFA、明确允许的管理员、分环境签名密钥。拥有签名密钥、修改 Worker 代码的权限相当于拥有远程节点管理能力。救援私钥应该离线保管。
 
 许可证待仓库所有者确定。
+
+## GitHub 与 Cloudflare Access 双身份绑定
+
+默认 Owner 第一次登录时使用部署引导邮箱绑定一个**经过 Access JWT 验证的 subject**。后续即使新 GitHub / Cloudflare 身份具有同一邮箱也**不会自动合并权限**。
+
+Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码；在另一个已通过 Cloudflare Access、尚未被 SSH Manager 授权的会话中粘贴该绑定码，系统校验相同邮箱、有效期及单次消费后绑定新身份。这样既支持两种登录方式，又防止仅凭邮箱提升权限。使用前需应用 `0002_identity_links.sql` 迁移。

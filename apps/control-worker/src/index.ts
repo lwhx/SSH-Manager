@@ -17,13 +17,14 @@ async function bodyJSON(req:Request):Promise<Record<string,unknown>> {
   ensure(!!obj&&typeof obj==="object"&&!Array.isArray(obj),"INVALID_JSON");
   return obj as Record<string,unknown>;
 }
-async function actor(req:Request,env:Env):Promise<Actor>{
+interface AccessIdentity {subject:string;email:string;}
+async function verifiedAccess(req:Request,env:Env):Promise<AccessIdentity>{
   ensure(env.ACCESS_TEAM_DOMAIN&&env.ACCESS_AUD&&env.BOOTSTRAP_OWNER_EMAIL,"ACCESS_NOT_CONFIGURED",503);
   const jwt=req.headers.get("Cf-Access-Jwt-Assertion");
   ensure(jwt,"UNAUTHORIZED",401);
   const url=new URL("https://"+env.ACCESS_TEAM_DOMAIN+"/cdn-cgi/access/certs");
   let claims;
-  try {
+  try{
     const result=await jwtVerify(jwt,createRemoteJWKSet(url),{
       issuer:"https://"+env.ACCESS_TEAM_DOMAIN,audience:env.ACCESS_AUD,
       algorithms:["RS256"]
@@ -31,18 +32,56 @@ async function actor(req:Request,env:Env):Promise<Actor>{
     claims=result.payload;
   }catch{throw new ApiError("UNAUTHORIZED",401);}
   const subject=String(claims.sub||"");
-  const email=String(claims.email||"").toLowerCase();
+  const email=String(claims.email||"").trim().toLowerCase();
   ensure(subject.length>8&&email.includes("@"),"UNAUTHORIZED",401);
-  let identity=await env.DB.prepare("SELECT u.id,u.email,u.role,u.status FROM user_identities i JOIN users u ON i.user_id=u.id WHERE i.subject=?").bind(subject).first<{id:string;email:string;role:string;status:string}>();
+  return {subject,email};
+}
+async function actor(req:Request,env:Env):Promise<Actor>{
+  const {subject,email}=await verifiedAccess(req,env);
+  let identity=await env.DB.prepare(
+    "SELECT u.id,u.email,u.role,u.status FROM user_identities i JOIN users u ON i.user_id=u.id WHERE i.subject=?"
+  ).bind(subject).first<{id:string;email:string;role:string;status:string}>();
+  // First login bootstraps ONLY the first verified Access subject. Never
+  // silently attach another identity provider because its email matches.
   if(!identity&&email===env.BOOTSTRAP_OWNER_EMAIL.toLowerCase()){
-    const user=await env.DB.prepare("SELECT * FROM users WHERE email=?").bind(email).first<{id:string;role:string;status:string}>();
-    const id=user?.id||crypto.randomUUID();
-    if(!user)await env.DB.prepare("INSERT INTO users(id,email,role,status,created_at) VALUES (?,?,'owner','active',?)").bind(id,email,now()).run();
-    await env.DB.prepare("INSERT OR IGNORE INTO user_identities(subject,user_id,provider,created_at) VALUES (?,?,?,?)").bind(subject,id,"access",now()).run();
-    identity={id,email,role:"owner",status:"active"};
+    const existing=await env.DB.prepare("SELECT id FROM users WHERE email=? LIMIT 1").bind(email).first();
+    if(!existing){
+      const id=crypto.randomUUID();
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO users(id,email,role,status,created_at) VALUES (?,?,'owner','active',?)").bind(id,email,now()),
+        env.DB.prepare("INSERT INTO user_identities(subject,user_id,provider,created_at) VALUES (?,?,?,?)").bind(subject,id,"cloudflare-access",now())
+      ]);
+      identity={id,email,role:"owner",status:"active"};
+    }
   }
   ensure(identity?.status==="active","FORBIDDEN",403);
   return {id:identity.id,email:identity.email,role:identity.role,subject};
+}
+async function claimIdentity(req:Request,env:Env):Promise<Response>{
+  // Deliberately available to Access-verified users WITHOUT an SSH Manager
+  // membership, but only with a one-time Owner-issued 256-bit linking token.
+  const identity=await verifiedAccess(req,env), b=await bodyJSON(req);
+  const token=String(b.token||"");
+  ensure(/^[a-zA-Z0-9_-]{40,64}$/.test(token),"INVALID_LINK_TOKEN",403);
+  const tokenHash=await sha256hex(token),t=now();
+  const row=await env.DB.prepare("SELECT t.id,t.user_id,u.email,u.status FROM identity_link_tokens t JOIN users u ON t.user_id=u.id WHERE t.token_hash=? AND t.used_at IS NULL AND t.expires_at>?")
+    .bind(tokenHash,t).first<{id:string;user_id:string;email:string;status:string}>();
+  ensure(row&&row.status==="active"&&row.email.toLowerCase()===identity.email,"INVALID_LINK_TOKEN",403);
+  const bound=await env.DB.prepare("SELECT user_id FROM user_identities WHERE subject=?").bind(identity.subject).first();
+  ensure(!bound,"IDENTITY_ALREADY_LINKED",409);
+  // The insertion is conditional on an unused token; the following update
+  // consumes it in the SAME D1 transaction. Concurrent claims cannot both win.
+  const [added,consumed]=await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO user_identities(subject,user_id,provider,created_at) SELECT ?,?,'cloudflare-access',? WHERE EXISTS "+
+      "(SELECT 1 FROM identity_link_tokens WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)")
+      .bind(identity.subject,row.user_id,t,row.id,tokenHash,t),
+    env.DB.prepare("UPDATE identity_link_tokens SET used_at=? WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?")
+      .bind(t,row.id,tokenHash,t)
+  ]);
+  ensure(added.meta.changes===1&&consumed.meta.changes===1,"INVALID_LINK_TOKEN",403);
+  await env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,NULL,'identity.link',NULL,'success',NULL,?)")
+    .bind(crypto.randomUUID(),row.user_id,t).run();
+  return response({linked:true});
 }
 function needRole(user:Actor,minimum:"viewer"|"admin"|"owner"){
   const ranks:{[k:string]:number}={viewer:0,admin:1,owner:2};
@@ -111,7 +150,19 @@ async function handle(req:Request,env:Env):Promise<Response>{
   const url=new URL(req.url);
   const p=url.pathname;
   if(p==="/api/v1/health")return response({status:"ok",version:"0.1.0",ssh_writes_enabled:false});
+  if(p==="/api/v1/identity/link-claim"&&req.method==="POST"){
+    safeRequest(req);return claimIdentity(req,env);
+  }
   const a=await actor(req,env);safeRequest(req);
+  if(p==="/api/v1/identity/link-start"&&req.method==="POST"){
+    needRole(a,"owner");
+    const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const digest=await sha256hex(token),t=now();
+    await env.DB.prepare("INSERT INTO identity_link_tokens(id,user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?,?)")
+      .bind(crypto.randomUUID(),a.id,digest,t+300,t).run();
+    await audit(env,a,null,"identity.link_token","created");
+    return response({token,expires_in:300});
+  }
   if(p==="/api/v1/me"&&req.method==="GET")return response({id:a.id,email:a.email,role:a.role});
   if(p==="/api/v1/nodes"&&req.method==="GET"){
     const q=await env.DB.prepare("SELECT id,name,ssh_host,ssh_port,login_user,status,init_stage,config_revision,agent_version,os_id,last_seen_at,created_at FROM nodes ORDER BY created_at DESC").all();
