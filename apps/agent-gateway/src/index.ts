@@ -244,61 +244,108 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
         "INSTALL_PROOF_MISSING",409);
     }
-    const detail=reportedDetail;
-    const changes=await env.DB.prepare("UPDATE operations SET status=?,result_code=?,detail=?,finished_at=? WHERE id=? AND node_id=? AND status IN ("+
-      allowed.map(()=>"?").join(",")+")")
-      .bind(status,reportedCode,detail,status==="RUNNING"?null:now(),opId,id,...allowed).run();
-    must(changes.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
-    if(op.action==="ssh.verification.prepare"&&status!=="RUNNING"){
-      const c=JSON.parse(op.command_json);
+    const t=now();
+    if(status==="RUNNING"){
+      const changed=await env.DB.prepare(
+        "UPDATE operations SET status='RUNNING',result_code=?,detail=?,finished_at=NULL "+
+        "WHERE id=? AND node_id=? AND status='DISPATCHED'"
+      ).bind(reportedCode,reportedDetail,opId,id).run();
+      must(changed.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
+      return response({accepted:true});
+    }
+    // All terminal effects must be part of ONE D1 transaction. Previously,
+    // the terminal operation could commit before the verification challenge,
+    // node keys/stage or audit were updated, leaving irrecoverable split state
+    // after an HTTP timeout, an FK failure, or a Worker exception.
+    const steps:D1PreparedStatement[]=[];
+    let guard="";
+    let guardArgs:unknown[]=[];
+    if(status==="SUCCEEDED"&&op.action==="ssh.verification.prepare"){
+      const cmd=JSON.parse(op.command_json);
+      guard=" AND EXISTS (SELECT 1 FROM ssh_verifications WHERE id=? AND node_id=? "+
+        "AND status='PENDING' AND expires_at>?)";
+      guardArgs=[cmd.payload.verification_id,id,t];
+    }
+    if(status==="SUCCEEDED"&&["ssh.daily.install","ssh.policy.inspect"].includes(op.action)){
+      guard+=" AND EXISTS (SELECT 1 FROM nodes WHERE id=?)";
+      guardArgs.push(id);
+    }
+    steps.push(env.DB.prepare(
+      "UPDATE operations SET status=?,result_code=?,detail=?,finished_at=? "+
+      "WHERE id=? AND node_id=? AND status IN ('DISPATCHED','RUNNING')"+guard
+    ).bind(status,reportedCode,reportedDetail,t,opId,id,...guardArgs));
+    // Each side effect is tied to the accepted terminal operation within the
+    // same transaction. No separate D1 call can mark the operation SUCCEEDED.
+    const committed=" EXISTS (SELECT 1 FROM operations WHERE id=? AND node_id=? "+
+      "AND status=? AND result_code=?)";
+    let requiredSideEffects=0;
+    if(op.action==="ssh.verification.prepare"){
+      const cmd=JSON.parse(op.command_json);
       if(status==="SUCCEEDED"){
-        await env.DB.prepare(
-          "UPDATE ssh_verifications SET prepared_at=? WHERE id=? AND node_id=? AND status='PENDING' AND expires_at>?"
-        ).bind(now(),c.payload.verification_id,id,now()).run();
+        steps.push(env.DB.prepare(
+          "UPDATE ssh_verifications SET prepared_at=? WHERE id=? AND node_id=? "+
+          "AND status='PENDING' AND expires_at>? AND"+committed
+        ).bind(t,cmd.payload.verification_id,id,t,opId,id,status,reportedCode));
+        requiredSideEffects=1;
       }else{
-        // A failed helper preparation cannot later be mistaken for a usable
-        // verification challenge. It never grants login or SSH permissions.
-        await env.DB.prepare(
+        steps.push(env.DB.prepare(
           "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
-          "WHERE id=? AND node_id=? AND status='PENDING'"
-        ).bind(now(),c.payload.verification_id,id).run();
+          "WHERE id=? AND node_id=? AND status='PENDING' AND"+committed
+        ).bind(t,cmd.payload.verification_id,id,opId,id,status,reportedCode));
       }
     }
     if(status==="SUCCEEDED"&&op.action==="ssh.policy.inspect"&&plain(b.detail)){
-      const previous=await env.DB.prepare("SELECT config_revision,init_stage FROM nodes WHERE id=?")
-        .bind(id).first<{config_revision:string;init_stage:string}>();
+      const previous=await env.DB.prepare(
+        "SELECT config_revision,init_stage FROM nodes WHERE id=?"
+      ).bind(id).first<{config_revision:string;init_stage:string}>();
       must(previous,"NODE_NOT_FOUND",404);
       const revision=String(b.detail.revision);
-      // A repeated inspection of the SAME policy must not erase a successful
-      // daily-key install or strand an already issued challenge.
-      const preserve=previous.init_stage==="WAITING_VERIFICATION"&&previous.config_revision===revision;
-      const steps=[
-        env.DB.prepare("UPDATE nodes SET config_revision=?,init_stage=? WHERE id=?")
-          .bind(revision,preserve?"WAITING_VERIFICATION":"POLICY_INSPECTED",id)
-      ];
+      // Idempotent policy inspection cannot downgrade an already VERIFIED
+      // node or invalidate an in-flight challenge with unchanged config.
+      const preserve=previous.config_revision===revision&&
+        (previous.init_stage==="WAITING_VERIFICATION"||previous.init_stage==="KEY_VERIFIED");
+      steps.push(env.DB.prepare(
+        "UPDATE nodes SET config_revision=?,init_stage=? WHERE id=? AND"+committed
+      ).bind(revision,preserve?previous.init_stage:"POLICY_INSPECTED",id,
+        opId,id,status,reportedCode));
+      requiredSideEffects=1;
       if(previous.config_revision!==revision){
         steps.push(env.DB.prepare(
           "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
-          "WHERE node_id=? AND status='PENDING'"
-        ).bind(now(),id));
+          "WHERE node_id=? AND status='PENDING' AND"+committed
+        ).bind(t,id,opId,id,status,reportedCode));
       }
-      await env.DB.batch(steps);
     }
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
-      const c=JSON.parse(op.command_json);
-      await env.DB.batch([
-        env.DB.prepare("INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) VALUES (?,?,?,?,'daily','installed')")
-          .bind(crypto.randomUUID(),id,c.payload.key_id,c.payload.login_user),
-        env.DB.prepare("UPDATE nodes SET init_stage='WAITING_VERIFICATION' WHERE id=?").bind(id),
-        // A new installation changes the challenge's security context.
-        env.DB.prepare("UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE node_id=? AND status='PENDING'")
-          .bind(now(),id)
-      ]);
+      const cmd=JSON.parse(op.command_json);
+      steps.push(env.DB.prepare(
+        "INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) "+
+        "SELECT ?,?,?,?,'daily','installed' WHERE"+committed
+      ).bind(crypto.randomUUID(),id,cmd.payload.key_id,cmd.payload.login_user,
+        opId,id,status,reportedCode));
+      steps.push(env.DB.prepare(
+        "UPDATE nodes SET init_stage='WAITING_VERIFICATION' WHERE id=? AND"+committed
+      ).bind(id,opId,id,status,reportedCode));
+      steps.push(env.DB.prepare(
+        "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
+        "WHERE node_id=? AND status='PENDING' AND"+committed
+      ).bind(t,id,opId,id,status,reportedCode));
+      requiredSideEffects=2;
     }
-    if(status!=="RUNNING"){
-      await env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,?,?,?,?,?,?)")
-        .bind(crypto.randomUUID(),op.operator_id,id,op.action,opId,status,String(b.result_code||"").slice(0,64),now()).run();
+    steps.push(env.DB.prepare(
+      "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
+      "SELECT ?,?,?,?,?,?,?,? WHERE"+committed
+    ).bind(crypto.randomUUID(),op.operator_id,id,op.action,opId,status,
+      reportedCode,t,opId,id,status,reportedCode));
+    // D1 batch executes transactionally; statement errors roll back ALL
+    // records. SQL predicates prevent later steps applying on failed claims.
+    const outcome=await env.DB.batch(steps);
+    must(outcome[0].meta.changes===1,"INVALID_STATUS_TRANSITION",409);
+    for(let index=1;index<=requiredSideEffects;index++){
+      must(outcome[index].meta.changes===1,"TERMINAL_REPORT_EFFECT_MISSING",409);
     }
+    must(outcome[outcome.length-1].meta.changes===1,
+      "TERMINAL_REPORT_AUDIT_MISSING",409);
     return response({accepted:true});
   }
   if(p==="/agent/v1/ws"){
