@@ -37,3 +37,16 @@ func permanentProofRejection(err error)(string,bool){
  default:return "",false
  }
 }
+
+// Only explicit, irrevocable server-side validation failures allow Agent
+// report archival. Unknown errors and lost acknowledgements must be retried.
+func permanentOperationReportRejection(err error)(string,bool){
+ var response *GatewayHTTPError
+ if !errors.As(err,&response)||response.Status!=409{return "",false}
+ switch response.Code{
+ case "VERIFICATION_PREPARATION_STALE","INVALID_PREPARATION_REPORT",
+  "INVALID_POLICY_REPORT","INSTALL_PROOF_MISSING","CONFLICTING_OPERATION_REPORT":
+  return response.Code,true
+ default:return "",false
+ }
+}

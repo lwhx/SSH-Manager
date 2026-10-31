@@ -94,6 +94,44 @@ func (a *Agent)enqueueOperationReport(id,status,code string,detail any)error{
  defer folder.Close()
  return folder.Sync()
 }
+// A definitively rejected old operation report must not block newer reports.
+// Keep its original JSON and terminal reason in a private Agent-owned archive.
+func (a *Agent)quarantineOperationReport(id,reason string)error{
+ if !operationID.MatchString(id){return errors.New("invalid report ID")}
+ switch reason{
+ case "VERIFICATION_PREPARATION_STALE","INVALID_PREPARATION_REPORT",
+  "INVALID_POLICY_REPORT","INSTALL_PROOF_MISSING","CONFLICTING_OPERATION_REPORT":
+ default:return errors.New("cannot archive unknown operation report error")
+ }
+ dir,err:=a.operationReportDir();if err!=nil{return err}
+ source:=filepath.Join(dir,id+".json")
+ if _,_,err=readOperationReport(source);err!=nil{return err}
+ archive:=filepath.Join(dir,"rejected")
+ if err=os.Mkdir(archive,0700);err!=nil&&!errors.Is(err,os.ErrExist){return err}
+ info,err:=os.Lstat(archive)
+ if err!=nil||!info.IsDir()||info.Mode().Perm()&0077!=0{
+  return errors.New("unsafe archived Agent report directory")
+ }
+ owner,ok:=info.Sys().(*syscall.Stat_t)
+ if !ok||owner.Uid!=uint32(os.Geteuid()){return errors.New("archived report owner mismatch")}
+ target:=filepath.Join(archive,id+".json")
+ if _,err=os.Lstat(target);err==nil{
+  return errors.New("previous rejected report already archived")
+ }else if !errors.Is(err,os.ErrNotExist){return err}
+ if err=os.Rename(source,target);err!=nil{return err}
+ metadata,err:=os.OpenFile(filepath.Join(archive,id+".reason"),os.O_CREATE|os.O_EXCL|os.O_WRONLY,0600)
+ if err!=nil{return err}
+ if _,err=metadata.WriteString(reason+"\n");err!=nil{_ = metadata.Close();return err}
+ if err=metadata.Sync();err!=nil{_ = metadata.Close();return err}
+ if err=metadata.Close();err!=nil{return err}
+ for _,path:=range []string{archive,dir}{
+  folder,err:=os.Open(path);if err!=nil{return err}
+  err=folder.Sync();_ = folder.Close()
+  if err!=nil{return err}
+ }
+ return nil
+}
+
 func (a *Agent)drainOperationReports(ctx context.Context){
  dir,err:=a.operationReportDir()
  if err!=nil{log.Printf("operation report outbox unavailable: %v",err);return}
@@ -114,8 +152,17 @@ func (a *Agent)drainOperationReports(ctx context.Context){
   }
   _,sendErr:=a.request(ctx,"/agent/v1/report",report)
   if sendErr!=nil{
-   // An unconfirmed result stays on disk. The already-executed command
-   // is NEVER replayed just to resubmit its receipt.
+   if reason,terminal:=permanentOperationReportRejection(sendErr);terminal{
+    if err=a.quarantineOperationReport(id,reason);err!=nil{
+     log.Printf("cannot safely archive terminally rejected report %s: %v",id,err)
+     return
+    }
+    log.Printf("terminal operation report %s archived for operator review (%s)",id,reason)
+    processed++
+    continue
+   }
+   // The already-executed command is NEVER replayed just to resubmit
+   // its receipt; a network error or unknown status keeps the report.
    log.Printf("operation report %s pending for retry: %v",id,sendErr)
    return
   }

@@ -59,3 +59,27 @@ secret"}`),
   if _,terminal:=permanentProofRejection(err);terminal{t.Fatal("unknown 409 quarantined proof")}
  }
 }
+
+func TestOnlyExplicitlyTerminalOperationReportCodesAreArchived(t *testing.T){
+ for _,code:=range []string{
+  "VERIFICATION_PREPARATION_STALE","INVALID_PREPARATION_REPORT",
+  "INVALID_POLICY_REPORT","INSTALL_PROOF_MISSING","CONFLICTING_OPERATION_REPORT",
+ }{
+  err:=parseGatewayHTTPError(409,[]byte(`{"error":"`+code+`"}`))
+  if actual,ok:=permanentOperationReportRejection(err);!ok||actual!=code{
+   t.Fatalf("terminal report error missing: %s %v",code,err)
+  }
+ }
+ for _,test:=range []struct{code string;status int}{
+  {"PREPARATION_SIDE_EFFECT_MISSING",409},
+  {"INVALID_STATUS_TRANSITION",409},
+  {"REPLAY",409},
+  {"INTERNAL_ERROR",503},
+  {"UNAUTHORIZED",401},
+ }{
+  err:=parseGatewayHTTPError(test.status,[]byte(`{"error":"`+test.code+`"}`))
+  if _,ok:=permanentOperationReportRejection(err);ok{
+   t.Fatalf("transient operation report discarded: %v",err)
+  }
+ }
+}
