@@ -5,6 +5,6 @@
   "client_address": "192.0.2.10",
   "local_address": "192.0.2.20",
   "ssh_port": 22,
-  "snapshot_root": "/var/lib/ssh-manager/snapshots/REPLACE_NODE",
+  "snapshot_root": "/var/lib/ssh-manager-root/snapshots/REPLACE_NODE",
   "enable_daily_install": false
 }

@@ -178,7 +178,7 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)Result{
 }
 func SafeUser(name string)bool{return accountRE.MatchString(name)}
 func ValidateSnapshotRoot(root string)error{
- if !strings.HasPrefix(root,"/var/lib/ssh-manager/snapshots/")||filepath.Clean(root)!=root{
+ if !strings.HasPrefix(root,"/var/lib/ssh-manager-root/snapshots/")||filepath.Clean(root)!=root{
   return fmt.Errorf("snapshots must remain under /var/lib/ssh-manager/snapshots")
  }
  return nil

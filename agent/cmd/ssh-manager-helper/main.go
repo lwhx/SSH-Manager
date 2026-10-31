@@ -22,7 +22,7 @@ import (
 
 const configPath="/etc/ssh-manager/helper.json"
 const socketPath="/run/ssh-manager/helper.sock"
-const journalPath="/var/lib/ssh-manager/helper-operations"
+const journalPath="/var/lib/ssh-manager-root/operations"
 
 func loadConfig()(sshhelper.Config,error){
  var c sshhelper.Config
