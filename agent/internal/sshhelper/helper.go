@@ -185,7 +185,12 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)(out Result){
  }
  if isManualSSHAction(cmd.Action){
   if cmd.ExpectedRevision=="unverified"||cmd.ExpectedRevision!=p.Revision{return fail("POLICY_REVISION_MISMATCH",nil)}
-  return h.executeManualSSH(ctx,cmd,p)
+  // Never modify SSH unless Root can produce an independently verifiable
+  // signed terminal receipt. The unprivileged Agent cannot forge that key.
+  if len(h.ProofSigningKey)!=ed25519.PrivateKeySize{return fail("ROOT_RECEIPT_KEY_UNAVAILABLE",nil)}
+  local:=h.executeManualSSH(ctx,cmd,p)
+  if !local.OK{return local}
+  return h.signManualReceipt(cmd,local)
  }
  if cmd.Action=="ssh.verification.prepare"{
   if cmd.ExpectedRevision!=p.Revision||cmd.ExpectedRevision=="unverified"{
