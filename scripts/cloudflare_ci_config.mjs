@@ -8,7 +8,7 @@ import {spawnSync} from "node:child_process";
 import {buildSingleConfig} from "./cloudflare_quick_lib.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
-const CONFIG=resolve(ROOT,"wrangler.single.staging.ci.jsonc");
+const CONFIG=resolve(ROOT,process.env.SSH_MANAGER_CI_CONFIG_OUTPUT||"wrangler.single.staging.ci.jsonc");
 const TEMPLATE=resolve(ROOT,"wrangler.single.staging.example.jsonc");
 const WRANGLER=resolve(ROOT,"node_modules/wrangler/bin/wrangler.js");
 function required(name){
