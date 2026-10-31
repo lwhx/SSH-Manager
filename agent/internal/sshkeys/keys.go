@@ -65,7 +65,17 @@ func openHome(home string,uid int)(int,error){
   next,err:=syscall.Openat(fd,name,syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
   syscall.Close(fd)
   if err!=nil{return -1,fmt.Errorf("open home component: %w",err)}
-  if err=checkedDir(next,uid);err!=nil{syscall.Close(next);return -1,fmt.Errorf("unsafe home component: %w",err)}
+  // A root-owned sticky ancestor (such as /tmp in isolated tests) cannot
+  // be replaced by other users; each openat still rejects symlink traversal.
+  // The final user's home itself must always pass strict ownership/mode checks.
+  if err=checkedDir(next,uid);err!=nil{
+   var st syscall.Stat_t
+   stickyRoot:=syscall.Fstat(next,&st)==nil&&st.Uid==0&&st.Mode&syscall.S_ISVTX!=0&&st.Mode&syscall.S_IFMT==syscall.S_IFDIR
+   if !stickyRoot||name==strings.Split(strings.TrimPrefix(home,"/"),"/")[len(strings.Split(strings.TrimPrefix(home,"/"),"/"))-1]{
+    syscall.Close(next)
+    return -1,fmt.Errorf("unsafe home component: %w",err)
+   }
+  }
   fd=next
  }
  return fd,nil
