@@ -1,25 +1,48 @@
-# SSH Manager V4：Cloudflare 单 Worker + 双自定义域名部署
+# SSH Manager Cloudflare 部署（简化版）
 
-> **仅独立 Staging**。P3.4 真实测试 VPS、Windows 全链路验收未完成，禁止对生产 SSH 认证执行高危操作。
+这是 **1 个 Cloudflare Worker + 2 个自定义域名 + 1 个 D1 + Worker 内部 Durable Object** 的架构。
 
-## 目标配置
+**推荐直接通过 Cloudflare Dashboard → Workers & Pages → GitHub 导入仓库，不再要求你先用 Windows 终端部署。**
 
-- 唯一 Worker：ssh-manager-staging。
-- 统一入口：apps/single-worker/src/index.ts。
-- 两个 Custom Domains（均属当前 Cloudflare zone）：管理域名 + Agent 域名。
-- 一个 D1：ssh-manager-staging，binding DB。
-- 一个 SQLite Durable Object：本 Worker 导出的 NodeSession，binding NODE_SESSIONS，**无跨 Worker script_name**。
-- ASSETS：apps/console/dist，必须 assets.run_worker_first=true。
-- workers_dev=false、preview_urls=false，拒绝其它访问入口。
-- 同一 Worker 中 COMMAND_PUBLIC_KEY 为公开配置，COMMAND_PRIVATE_KEY 为仅存在 Cloudflare 的 Secret。
+## 只做 3 步
 
-**Access 只能保护 Control hostname，不能保护整个 Worker：** Cloudflare Zero Trust 需要为 Control 自定义域名创建 Self-hosted Access Application，配置 GitHub/Cloudflare IdP、MFA、精确 Owner Allow。Agent 自定义域名使用设备 Ed25519 验证，不允许浏览器 Access 阻断 WebSocket。Worker 内部所有管理页面和 API 均再次验签 Access JWT。
+1. **Cloudflare Zero Trust**：为管理域名（默认 ssh-staging.你的主域名）创建 hostname-based Access 应用，绑定 GitHub / Cloudflare IdP 和 Owner 邮箱、MFA，记录 Team Domain 与 AUD。
+2. **Cloudflare Workers & Pages → GitHub**：选 lwhx/SSH-Manager、main、Worker 名 ssh-manager-staging。Root 目录为仓库根目录，Build command 留空，**Deploy command 写 npm run cf:deploy**，Preview command 写 npm run cf:preview:skip。
+3. **只填 4 个 Build Variables 并 Save and Deploy**：
+   - SSH_MANAGER_BASE_DOMAIN=你的 Cloudflare zone（例 whks.de）
+   - SSH_MANAGER_ACCESS_TEAM_DOMAIN=你的 Access Team Domain
+   - SSH_MANAGER_ACCESS_AUD=Control Access Application AUD
+   - SSH_MANAGER_OWNER_EMAIL=你的管理员邮箱
 
-Control 与 Agent 域名必须不同，DNS/Custom Domain 不得与旧 Worker 或既存 CNAME 冲突。
+**提醒：** Cloudflare 默认 Workers Builds Token 可能没有 D1 权限。首次部署应选择限定当前账户的 API Token，授予 Workers Scripts/Routes 和 D1 必要的 Read/Edit 权限。账户/Token 鉴权错误按日志修复，绝不把 Token 提交 GitHub。
 
-## 快捷部署
+首次云端构建会自动创建 Staging D1、完成迁移、生成短暂存在于构建进程内的 Ed25519 签名私钥并通过 stdin 存到 Worker Secret，再部署**一个** Worker 和两个 Custom Domains。部署后的 GitHub main 自动更新只会复用已有 D1、域名、DO、签名密钥。
 
-先在 Cloudflare Zero Trust 创建 Control 域名的 Access Application，取得 Team Domain、Application AUD、Owner 邮箱。
+如果想使用不同域名，可同时设置 SSH_MANAGER_CONTROL_HOSTNAME 和 SSH_MANAGER_AGENT_HOSTNAME 覆盖默认的 ssh-staging / agent-staging。
+
+**管理 hostname 独占 Cloudflare Access**；不能对整个 Worker 开启 Access，否则 Agent WebSocket 失败。Worker 会再验证 JWT 且按 Host 拒绝其他服务的路径。必须保持 workers_dev=false、preview_urls=false 和 assets.run_worker_first=true。
+
+## 不建议的事情
+
+- 不要用两个 Worker 来部署当前代码。
+- 不要使用带 REPLACE 占位符的示例 Wrangler 文件直接部署。
+- 不要在 GitHub/Cloudflare Build Variables 存放 SSH 私钥、Root 证明私钥或 COMMAND_PRIVATE_KEY。
+- 不要删除旧 D1 后重复初始化。私钥如果丢失或远端状态不完整，必须人工恢复。
+- 不要把部署成功视为 P3.4 真机验收通过，也不允许直接对生产 VPS 开启 SSH 危险写入。
+
+## 部署验证
+
+访问管理域名应该先跳转 Cloudflare Access。Agent 域名 /agent/v1/health 直接返回设备认证 JSON；Agent 域名的 /、/api/v1/health 必须返回 404。
+
+真实环境联调还应执行：
+
+~~~bash
+python scripts/staging_remote_probe.py --staging-only --control-url https://ssh-staging.你的主域名 --gateway-url https://agent-staging.你的主域名
+~~~
+
+进一步参阅 [3 步快捷部署指南](CLOUDFLARE_QUICK_DEPLOY.md) 和 [双 Worker 迁移](MIGRATE_DUAL_TO_SINGLE.md)。
+
+## 备用本地部署方式
 
 ~~~powershell
 git clone https://github.com/lwhx/SSH-Manager.git
@@ -29,50 +52,4 @@ npx wrangler login
 npm run cf:quick
 ~~~
 
-首次引导输入两个域名、Access Team Domain、AUD、Owner 邮箱，并确认 SINGLE-STAGING。已存在 Staging D1 时必须输入 REUSE-SINGLE-D1，且不能把旧 D1 当作旧 Durable Object 自动迁移。
-
-本地生成的 wrangler.single.staging.local.jsonc、.ssh-manager-deploy/single-staging.json 已在 gitignore 中；它们不保存私钥。快捷脚本按已绑定的 D1、公钥、域名和安全锁检查环境，绝不在更新时自动更换签名密钥。
-
-后续更新：
-
-~~~powershell
-git pull --ff-only
-npm install
-npm run cf:quick
-~~~
-
-离线测试（绝不触及云端）：
-
-~~~powershell
-npm run test:cf:quick
-npm run cf:quick:dry
-~~~
-
-## 手动 Wrangler 部署（不使用脚本）
-
-复制 wrangler.single.staging.example.jsonc → wrangler.single.staging.local.jsonc。填入 Cloudflare D1 UUID、两域名（routes 及 CONTROL_HOSTNAME/AGENT_HOSTNAME）、Access Team Domain/AUD、Owner 邮箱与命令公钥。私钥 PKCS#8 DER Base64 只能安全上传为 Cloudflare Worker Secret，不提交到 GitHub/D1/Agent。
-
-~~~bash
-npm install
-npm run check
-npm run build:web
-npx wrangler d1 migrations apply ssh-manager-staging --remote --config wrangler.single.staging.local.jsonc
-npx wrangler deploy --config wrangler.single.staging.local.jsonc
-npx wrangler secret put COMMAND_PRIVATE_KEY --config wrangler.single.staging.local.jsonc
-~~~
-
-已配置过 Cloudflare Secret 时不要覆盖旧私钥。所有危险操作开关默认 false。
-
-## 必须完成的安全验收
-
-~~~bash
-python scripts/staging_remote_probe.py --staging-only --control-url https://console-staging.example.com --gateway-url https://agent-staging.example.com
-~~~
-
-Control 匿名 API 必须被 Access 拦截；Agent /agent/v1/health 正常返回设备签名认证 JSON；Agent /api/v1/health、/ 和 /index.html 必须返回 404。管理域名登录后访问 Agent API 也必须 404。
-
-检查两个自定义域名确实指向同一个 Worker，且 workers.dev / Preview URLs 均关闭。只有安全拓扑通过才能继续单台 VPS 的 T01–T11 验收。
-
-已有双 Worker Staging/生产实例必须先阅读 [人工迁移指南](MIGRATE_DUAL_TO_SINGLE.md)；快捷部署不会自动处理旧 DO 命名空间、Agent 连接、D1 与签名密钥。
-
-紧急恢复必须使用云厂商 Console/VNC/Rescue。项目永不因 SSH 断开自动回滚或恢复密码登录。
+本地首次引导现在只需要一个 Control 域名，Agent 域名自动推导；后续使用同一条 npm run cf:quick 更新。Cloudflare Workers Builds / GitHub Actions / 本地更新应选一个作为主要部署渠道，避免并行部署冲突。
