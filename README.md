@@ -130,3 +130,7 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 ## P3.3 当前安全边界
 
 现在已接通 Cloudflare 签名准备命令、单 VPS Agent、Root Helper 私有挑战存储以及准备状态回报。另有只读 sshd journald / Linux 进程链 / nonce 组合验证组件及单元测试。**准备完成不代表已完成 SSH 公钥认证。** 专用证明 Socket、服务端独立签名证明、Cloudflare 一次性可信验签与 Windows/真实 VPS 验收仍待开发，P4 关闭密码登录继续锁定。详见 docs/P3_VERIFICATION.md。
+
+## P3.3 可信 Root 签名证明（Staging 原型）
+
+已实现会话内无特权 CLI `ssh-manager-prove`、Root 独立证明 Socket、只读 sshd/journald 认证检查、Root Ed25519 签名、Agent 安全转发、Owner 单节点证明公钥固定，以及 Cloudflare 一次性 VERIFIED 更新。**尚未通过真实 VPS + Cloudflare Staging E2E；P4 密码认证关闭依然锁定。** 见 [P3.3 隔离验收与 Windows PowerShell 验证指南](docs/P3_PROOF_END_TO_END.md)。需应用所有迁移，包括 0005。
