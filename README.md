@@ -29,7 +29,8 @@
 | Agent 命令验签、过期与白名单 | 初版代码 |
 | P3 安全 authorized_keys 本地模块 | **已实现基础与单元测试，尚未接入特权 Helper** |
 | P3 SSH 有效配置规则解析 | **已提交解析模块与用例，尚未接入特权 Helper** |
-| Agent 日常公钥真正安装 | **未实现，Agent 会明确返回失败** |
+| Root-only Unix Socket Helper | **基础实现与单元测试，默认禁用日常公钥安装** |
+| Agent 日常公钥真正安装 | **具备本地显式 opt-in 路径，尚未真实 VPS 验收** |
 | 可信 SSH 登录证明 | **未实现，后端拒绝调用** |
 | 关闭密码登录 | **锁定** |
 | 单节点救援与手动回滚 | **锁定** |
@@ -115,3 +116,7 @@ Cloudflare 控制面本身是高价值权限入口：需要 MFA、明确允许�
 默认 Owner 第一次登录时使用部署引导邮箱绑定一个**经过 Access JWT 验证的 subject**。后续即使新 GitHub / Cloudflare 身份具有同一邮箱也**不会自动合并权限**。
 
 Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码；在另一个已通过 Cloudflare Access、尚未被 SSH Manager 授权的会话中粘贴该绑定码，系统校验相同邮箱、有效期及单次消费后绑定新身份。这样既支持两种登录方式，又防止仅凭邮箱提升权限。使用前需应用 `0002_identity_links.sql` 迁移。
+
+## P3.1 特权 Helper
+
+详情参阅 [P3 Helper 运行与安全验收指南](docs/P3_HELPER.md)。Root Helper 在 VPS 本地独立运行，重新验签并验证 Unix Socket UID，只接受 ssh.policy.inspect 及明确启用的 ssh.daily.install。默认禁用所有 SSH 写入操作，绝不自动修改密码登录方式。
