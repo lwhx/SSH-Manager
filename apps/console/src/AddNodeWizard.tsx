@@ -1,5 +1,6 @@
 import React,{useEffect,useRef,useState,type FormEvent} from "react";
 import AgentInstallWizard from "./AgentInstallWizard";
+import {isNodeOnline} from "./nodeDisplay";
 
 export interface NewNodeDraft{name:string;ssh_host:string;ssh_port:number;login_user:string;}
 export interface WizardNode{id:string;name:string;status:string;init_stage:string;last_seen_at?:number;}
@@ -80,7 +81,7 @@ export default function AddNodeWizard({
     <button disabled={working||busy} onClick={()=>{setStep(3);void refresh();}}>检查连接状态 →</button></div>
   </>}
   {step===3&&created&&<div className="wizard-result">
-   <h3>{created.status==="online"?"Agent 已上线":created.status==="unpaired"?"等待 Agent 配对":"Agent 已配对，等待上线"}</h3>
+   <h3>{isNodeOnline(created)?"Agent 已上线":created.status==="unpaired"?"等待 Agent 配对":"Agent 已配对，等待上线"}</h3>
    <p>节点：{created.name}</p>
    <p>初始化阶段：{created.init_stage}</p>
    <p>只有 Agent 心跳上线、Root Helper 的可信证据和真实 SSH 公钥登录验证完成后，才能由管理员手工关闭密码登录。</p>

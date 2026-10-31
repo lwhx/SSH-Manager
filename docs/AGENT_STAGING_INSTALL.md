@@ -11,7 +11,7 @@
 
 ## 管理面板安装入口
 
-进入 VPS 管理 → 选中 WAITING_PAIR 节点 → Agent 安装与配对。复制命令到该测试 VPS 的终端。命令指向 **管理面板自身所部署的 Git SHA**，避免使用移动的 main 分支造成 Agent/Worker 协议不一致。
+进入「VPS 节点」→「添加 VPS」→「基本信息」→「安装 Agent」；已有 WAITING_PAIR 节点则从服务器列表点击「查看详情」→「Agent 管理」。复制命令到该测试 VPS 的终端。命令指向 **管理面板自身所部署的 Git SHA**，避免使用移动的 main 分支造成 Agent/Worker 协议不一致。
 
 安装器执行以下安全流程：
 
