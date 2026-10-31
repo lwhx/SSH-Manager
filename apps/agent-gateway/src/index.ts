@@ -1,5 +1,5 @@
 import {DurableObject} from "cloudflare:workers";
-import {verifyPinnedSSHProof} from "../../../packages/protocol/src/proof";
+import {verifyPinnedSSHProof,verifyPinnedSSHSignature} from "../../../packages/protocol/src/proof";
 import {ApiError,errorResponse,response,now,sha256hex,decodeBase64url,validNodeId} from "../../../packages/protocol/src/index";
 interface Env {DB:D1Database;NODE_SESSIONS:DurableObjectNamespace;COMMAND_PUBLIC_KEY:string;}
 function must(v:unknown,code:string,status=400):asserts v{if(!v)throw new ApiError(code,status);}
@@ -95,8 +95,18 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     must(trusted,"NODE_ROOT_PROOF_KEY_NOT_PINNED",403);
     const challenge=await env.DB.prepare(
       "SELECT id,node_id,public_key_id,login_user,key_fingerprint,config_revision,nonce_hash,"+
-      "status,created_at,expires_at,prepared_at FROM ssh_verifications WHERE id=? AND node_id=?"
+      "status,created_at,expires_at,prepared_at,proof_id,proof_hash FROM ssh_verifications WHERE id=? AND node_id=?"
     ).bind(String(claim.verification_id),id).first<any>();
+    if(challenge?.status==="VERIFIED"&&
+       challenge.proof_id===claim.proof_id&&
+       challenge.proof_hash===await sha256hex(payload)){
+      // A lost acknowledgement after a successful guarded D1 transition may
+      // be safely retried. Still verify the owner's pinned root signature;
+      // never re-run the status update or audit insertion.
+      try{await verifyPinnedSSHSignature(payload,signature,trusted.public_key);}
+      catch{throw new ApiError("INVALID_ROOT_PROOF_SIGNATURE",403);}
+      return response({accepted:true,verification_id:challenge.id,status:"VERIFIED",idempotent:true});
+    }
     must(challenge&&challenge.status==="PENDING"&&challenge.prepared_at!=null&&
       challenge.expires_at>now(),"CHALLENGE_NOT_ACTIVE",409);
     const node=await env.DB.prepare(

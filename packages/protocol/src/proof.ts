@@ -33,8 +33,8 @@ export function proofMatchesChallenge(proof:ProofEvidence,expected:ExpectedSSHPr
 }
 // The signature is over the EXACT original JSON UTF-8 bytes, not a
 // reconstructed object, preventing noncanonical reserialization attacks.
-export async function verifyPinnedSSHProof(payload:string,signature:string,
- proofPublicKey:string,expected:ExpectedSSHProof):Promise<ProofEvidence>{
+export async function verifyPinnedSSHSignature(payload:string,signature:string,
+ proofPublicKey:string):Promise<void>{
  if(payload.length===0||payload.length>4096||signature.length>128||
     !/^[A-Za-z0-9_-]{86}$/.test(signature)||
     !/^[A-Za-z0-9_-]{43}$/.test(proofPublicKey)){
@@ -44,11 +44,16 @@ export async function verifyPinnedSSHProof(payload:string,signature:string,
  try{
   const pub=Uint8Array.from(decodeBase64url(proofPublicKey));
   const sig=Uint8Array.from(decodeBase64url(signature));
-  if(pub.length!==32||sig.length!==64)throw new Error("bad length");
+  if(pub.length!==32||sig.length!==64)throw new Error("invalid signed proof length");
   const key=await crypto.subtle.importKey("raw",pub,{name:"Ed25519"},false,["verify"]);
   verified=await crypto.subtle.verify({name:"Ed25519"},key,sig,new TextEncoder().encode(payload));
  }catch{throw new Error("INVALID_ROOT_PROOF_SIGNATURE");}
  if(!verified)throw new Error("INVALID_ROOT_PROOF_SIGNATURE");
+}
+// The signature is over the EXACT original JSON bytes.
+export async function verifyPinnedSSHProof(payload:string,signature:string,
+ proofPublicKey:string,expected:ExpectedSSHProof):Promise<ProofEvidence>{
+ await verifyPinnedSSHSignature(payload,signature,proofPublicKey);
  let parsed:unknown;
  try{parsed=JSON.parse(payload);}catch{throw new Error("INVALID_ROOT_PROOF_PAYLOAD");}
  if(!isRecord(parsed)||!proofMatchesChallenge(parsed as unknown as ProofEvidence,expected)){
