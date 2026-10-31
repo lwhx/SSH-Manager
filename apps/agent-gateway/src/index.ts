@@ -1,4 +1,5 @@
 import {DurableObject} from "cloudflare:workers";
+import {verifyPinnedSSHProof} from "../../../packages/protocol/src/proof";
 import {ApiError,errorResponse,response,now,sha256hex,decodeBase64url,validNodeId} from "../../../packages/protocol/src/index";
 interface Env {DB:D1Database;NODE_SESSIONS:DurableObjectNamespace;COMMAND_PUBLIC_KEY:string;}
 function must(v:unknown,code:string,status=400):asserts v{if(!v)throw new ApiError(code,status);}
@@ -76,6 +77,80 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     const taken=await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(op.id).run();
     if(taken.meta.changes!==1)return response({command:null});
     return response({command:op.command_json,signature:op.signature});
+  }
+  if(p==="/agent/v1/ssh-proof"){
+    const b=await jsonBody(req);
+    const payload=String(b.payload||""),signature=String(b.signature||"");
+    must(payload.length>0&&payload.length<=4096&&signature.length<=128,"PROOF_TOO_LARGE");
+    // Untrusted payload may only be used to LOOK UP matching D1 state. The
+    // exact bytes are verified against an Owner-pinned per-node root key before
+    // a single byte of verified state can be changed.
+    let claim:any;
+    try{claim=JSON.parse(payload);}catch{throw new ApiError("INVALID_PROOF_JSON");}
+    must(plain(claim)&&validNodeId(String(claim.verification_id||""))&&
+      validNodeId(String(claim.proof_id||"")),"INVALID_PROOF_ID");
+    const trusted=await env.DB.prepare(
+      "SELECT public_key FROM node_ssh_proof_keys WHERE node_id=?"
+    ).bind(id).first<{public_key:string}>();
+    must(trusted,"NODE_ROOT_PROOF_KEY_NOT_PINNED",403);
+    const challenge=await env.DB.prepare(
+      "SELECT id,node_id,public_key_id,login_user,key_fingerprint,config_revision,nonce_hash,"+
+      "status,created_at,expires_at,prepared_at FROM ssh_verifications WHERE id=? AND node_id=?"
+    ).bind(String(claim.verification_id),id).first<any>();
+    must(challenge&&challenge.status==="PENDING"&&challenge.prepared_at!=null&&
+      challenge.expires_at>now(),"CHALLENGE_NOT_ACTIVE",409);
+    const node=await env.DB.prepare(
+      "SELECT login_user,config_revision,init_stage FROM nodes WHERE id=?"
+    ).bind(id).first<any>();
+    const activeDaily=await env.DB.prepare(
+      "SELECT id FROM public_keys WHERE purpose='daily' AND active=1"
+    ).first<{id:string}>();
+    must(node&&node.init_stage==="WAITING_VERIFICATION"&&
+      node.login_user===challenge.login_user&&
+      node.config_revision===challenge.config_revision&&
+      activeDaily?.id===challenge.public_key_id,"CHALLENGE_CONTEXT_CHANGED",409);
+    const expected={
+      nodeId:id,verificationId:challenge.id,keyId:challenge.public_key_id,
+      loginUser:challenge.login_user,fingerprint:challenge.key_fingerprint,
+      configRevision:challenge.config_revision,nonceHash:challenge.nonce_hash,
+      createdAt:challenge.created_at,expiresAt:challenge.expires_at,now:now()
+    };
+    let signed;
+    try{
+      signed=await verifyPinnedSSHProof(payload,signature,trusted.public_key,expected);
+    }catch{
+      throw new ApiError("ROOT_SSH_PROOF_SIGNATURE_OR_CONTEXT_INVALID",403);
+    }
+    const hash=await sha256hex(payload);
+    // This guarded D1 state transition is the ONLY route to VERIFIED.
+    // Replayed proofs and modified node/key/revision/expiry fail closed.
+    const verified=await env.DB.prepare(
+      "UPDATE ssh_verifications SET status='VERIFIED',verified_at=?,proof_id=?,proof_hash=? "+
+      "WHERE id=? AND node_id=? AND status='PENDING' AND prepared_at IS NOT NULL "+
+      "AND expires_at>? AND nonce_hash=? AND login_user=? AND key_fingerprint=? "+
+      "AND config_revision=? AND public_key_id=? "+
+      "AND EXISTS (SELECT 1 FROM nodes WHERE id=? AND login_user=? AND config_revision=? "+
+      "AND init_stage='WAITING_VERIFICATION') "+
+      "AND EXISTS (SELECT 1 FROM public_keys WHERE id=? AND purpose='daily' AND active=1)"
+    ).bind(now(),signed.proof_id,hash,challenge.id,id,now(),
+      challenge.nonce_hash,challenge.login_user,challenge.key_fingerprint,
+      challenge.config_revision,challenge.public_key_id,
+      id,challenge.login_user,challenge.config_revision,challenge.public_key_id).run();
+    must(verified.meta.changes===1,"PROOF_ALREADY_USED_OR_CONTEXT_CHANGED",409);
+    await env.DB.prepare(
+      "UPDATE node_keys SET verified_at=? WHERE node_id=? AND public_key_id=? "+
+      "AND login_user=? AND purpose='daily' AND state='installed'"
+    ).bind(now(),id,challenge.public_key_id,challenge.login_user).run();
+    await env.DB.prepare(
+      "UPDATE nodes SET init_stage='KEY_VERIFIED' WHERE id=? AND init_stage='WAITING_VERIFICATION' "+
+      "AND config_revision=?"
+    ).bind(id,challenge.config_revision).run();
+    await env.DB.prepare(
+      "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
+      "VALUES (?,?,?,'ssh.verification.proof',NULL,'VERIFIED',?,?)"
+    ).bind(crypto.randomUUID(),String(challenge.id),id,
+      "proof_id="+signed.proof_id,now()).run();
+    return response({accepted:true,verification_id:challenge.id,status:"VERIFIED"});
   }
   if(p==="/agent/v1/report"){
     const b=await jsonBody(req);

@@ -193,6 +193,38 @@ async function handle(req:Request,env:Env):Promise<Response>{
       ensure(node.status==="unpaired","NODE_ALREADY_PAIRED",409);
       return response(await freshPairToken(env,a,node.id));
     }
+    if(sub==="ssh-proof-key"&&req.method==="GET"){
+      needRole(a,"admin");
+      const pinned=await env.DB.prepare(
+        "SELECT public_key,fingerprint,created_at FROM node_ssh_proof_keys WHERE node_id=?"
+      ).bind(node.id).first();
+      return response({pinned});
+    }
+    if(sub==="ssh-proof-key"&&req.method==="POST"){
+      needRole(a,"owner");
+      const b=await bodyJSON(req);
+      ensure(b.confirm_node_id===node.id,"NODE_CONFIRMATION_REQUIRED",403);
+      const publicKey=String(b.public_key||"");
+      ensure(/^[A-Za-z0-9_-]{43}$/.test(publicKey),"INVALID_PROOF_PUBLIC_KEY",400);
+      let raw:Uint8Array;
+      try{raw=decodeBase64url(publicKey);}
+      catch{throw new ApiError("INVALID_PROOF_PUBLIC_KEY",400);}
+      ensure(raw.length===32,"INVALID_PROOF_PUBLIC_KEY",400);
+      // The owner must separately inspect the key printed by the root VPS
+      // helper. The Agent cannot register or replace this trust anchor.
+      const canonical=base64url(raw);
+      ensure(publicKey===canonical,"NON_CANONICAL_PROOF_KEY",400);
+      const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",Uint8Array.from(raw)));
+      const fingerprint="SHA256:"+btoa(String.fromCharCode(...digest)).replace(/=+$/,"");
+      ensure(b.confirm_fingerprint===fingerprint,"PROOF_FINGERPRINT_CONFIRMATION_REQUIRED",403);
+      const result=await env.DB.prepare(
+        "INSERT OR IGNORE INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at) "+
+        "VALUES (?,?,?,?,?)"
+      ).bind(node.id,publicKey,fingerprint,a.id,now()).run();
+      ensure(result.meta.changes===1,"NODE_PROOF_KEY_ALREADY_PINNED",409);
+      await audit(env,a,node.id,"ssh.proof-key.pin","ok");
+      return response({node_id:node.id,fingerprint,pinned:true},201);
+    }
     if(sub==="preflight"&&req.method==="POST"){
       needRole(a,"admin");
       return queueNodeOperation(req,env,a,node,"node.preflight",{login_user:node.login_user,ssh_port:node.ssh_port});
@@ -213,6 +245,10 @@ async function handle(req:Request,env:Env):Promise<Response>{
     }
     if(sub==="ssh-verification/start"&&req.method==="POST"){
       needRole(a,"admin");
+      const rootKey=await env.DB.prepare(
+        "SELECT public_key FROM node_ssh_proof_keys WHERE node_id=?"
+      ).bind(node.id).first();
+      ensure(rootKey,"NODE_PROOF_KEY_NOT_PINNED",409);
       const key=await env.DB.prepare(
         "SELECT id,fingerprint FROM public_keys WHERE purpose='daily' AND active=1"
       ).first<{id:string;fingerprint:string}>();
