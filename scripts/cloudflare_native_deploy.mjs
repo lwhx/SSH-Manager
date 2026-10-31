@@ -1,131 +1,172 @@
 #!/usr/bin/env node
-// Cloudflare Workers Builds/GitHub integration: redeploy the SAME Worker.
+// Cloudflare-native GitHub Builds: ONE Worker, TWO domains, ZERO manual Wrangler config.
 //
-// No parameters such as D1 UUID, domain, Access AUD, public signer or owner
-// email need to be re-entered. Recover non-secret bindings from the already
-// deployed Worker via Cloudflare's READ-ONLY settings API. NEVER bootstrap a
-// new signer, Worker or D1 in a Git build.
-import {existsSync,readFileSync,writeFileSync,mkdirSync,rmSync} from "node:fs";
+// First run in a NEW Staging account/environment: create exactly one D1,
+// generate an ephemeral Ed25519 signer, deploy one Worker, and write the private
+// signer directly to Cloudflare Secret. Subsequent runs read the DEPLOYED
+// Worker's public bindings and NEVER rotate the signer or recreate D1.
+//
+// This script never updates production VPS, never enables manual SSH writes,
+// and will not silently recover a partially deployed cryptographic identity.
+import {existsSync,readFileSync,writeFileSync,rmSync} from "node:fs";
 import {dirname,resolve,join} from "node:path";
 import {fileURLToPath} from "node:url";
 import {spawnSync} from "node:child_process";
+import {buildSingleConfig,findStagingDatabase,generateCommandSigner} from "./cloudflare_quick_lib.mjs";
 import {
- extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse
+ extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse,
+ newCloudflareBootstrap,classifyWorkerForBootstrap
 } from "./cloudflare_native_lib.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
 const TEMPLATE=join(ROOT,"wrangler.single.staging.example.jsonc");
-// Wrangler resolves relative entry and assets paths against this config's directory.
+// Wrangler resolves entrypoint/assets relative to config directory -> repo ROOT.
 const CONFIG=join(ROOT,"wrangler.single.staging.native.jsonc");
 const NAME="ssh-manager-staging";
 const DB="ssh-manager-staging";
 
 function run(entry,args,options={}){
+ const input=typeof options.input==="string";
  const child=spawnSync(process.execPath,[entry,...args],{
   cwd:ROOT,env:process.env,encoding:"utf8",
-  stdio:options.capture?["ignore","pipe","pipe"]:"inherit",
-  maxBuffer:4*1024*1024
+  stdio:options.capture?["ignore","pipe","pipe"]:
+   input?["pipe","inherit","inherit"]:"inherit",
+  ...(input?{input:options.input}:{}),maxBuffer:4*1024*1024
  });
- if(child.error)throw Error("Unable to execute "+args[0]+": "+child.error.message);
+ if(child.error)throw Error("Cannot execute "+args[0]+": "+child.error.message);
  if(child.status!==0){
+  // Never print private-key stdin or environment values in an error.
   throw Error("Command failed: "+args[0]+
-   (options.capture?", check Cloudflare login/API token and permissions":""));
+   (options.capture?" (check Cloudflare API token/account permissions)":""));
  }
  return options.capture?String(child.stdout||""):"";
 }
 function wrangler(args,options={}){
- if(!existsSync(WRANGLER))throw Error("Wrangler missing. Run npm install before deployment.");
+ if(!existsSync(WRANGLER))throw Error("Wrangler not installed; run npm install.");
  return run(WRANGLER,args,options);
 }
 function accountId(){
- if(process.env.CLOUDFLARE_ACCOUNT_ID){
-  const id=process.env.CLOUDFLARE_ACCOUNT_ID.trim();
-  if(!/^[a-f0-9]{32}$/i.test(id))throw Error("CLOUDFLARE_ACCOUNT_ID is not a valid account ID");
-  return id;
+ const envId=String(process.env.CLOUDFLARE_ACCOUNT_ID||"").trim();
+ if(envId){
+  if(!/^[a-f0-9]{32}$/i.test(envId))throw Error("Invalid CLOUDFLARE_ACCOUNT_ID");
+  return envId;
  }
- const output=wrangler(["whoami","--json"],{capture:true});
  let json;
- try{json=JSON.parse(output);}catch{
-  throw Error("Cannot discover Cloudflare Account ID. Add CLOUDFLARE_ACCOUNT_ID to Build Variables.");
- }
+ try{json=JSON.parse(wrangler(["whoami","--json"],{capture:true}));}
+ catch{throw Error("Cannot discover Cloudflare account. Set CLOUDFLARE_ACCOUNT_ID as a build variable.");}
  return extractWhoamiAccount(json);
 }
 async function settings(id){
  const token=process.env.CLOUDFLARE_API_TOKEN;
  if(!token)throw Error(
-  "Cloudflare Build requires CLOUDFLARE_API_TOKEN for read-only Worker settings lookup. "+
-  "Use a scoped Cloudflare Builds API token with Workers Scripts Read/Edit + D1 Edit permissions.");
+  "CLOUDFLARE_API_TOKEN missing from Cloudflare Builds. Select a scoped Build API token "+
+  "with Workers Scripts Read/Edit, Workers Routes Edit and D1 Read/Edit permissions.");
  const response=await fetch(
   "https://api.cloudflare.com/client/v4/accounts/"+id+"/workers/scripts/"+NAME+"/settings",
   {headers:{Authorization:"Bearer "+token,Accept:"application/json"},
    signal:AbortSignal.timeout(12000)}
  );
- if(response.status===404)throw Error(
-  "Worker "+NAME+" does not exist. First run npm run cf:quick locally to initialize D1 and the command signer.");
+ if(response.status===404)return null;
  if(response.status===401||response.status===403)throw Error(
-  "Cloudflare Build API token cannot read the existing Worker. Check scoped Workers Scripts permissions.");
- if(!response.ok)throw Error("Unable to read Worker settings (HTTP "+response.status+"). No deployment performed.");
+  "Build API token cannot read the Worker; set Workers Scripts Read permission.");
+ if(!response.ok)throw Error("Cloudflare Worker settings unavailable (HTTP "+response.status+").");
  let json;
- try{json=await response.json();}catch{throw Error("Cloudflare returned invalid settings JSON");}
+ try{json=await response.json();}catch{throw Error("Invalid Cloudflare Worker settings response");}
  return requireCloudflareSettingsResponse(json);
 }
-function databases(){
- let data;
- try{data=JSON.parse(wrangler(["d1","list","--json"],{capture:true}));}
- catch{throw Error("Cannot list existing D1. Ensure Build API token has D1 Read permission.");}
- return data;
+function databaseList(){
+ let value;
+ try{value=JSON.parse(wrangler(["d1","list","--json"],{capture:true}));}
+ catch{throw Error("D1 list unavailable. Build API token requires D1 Read/Edit permission.");}
+ return value;
 }
 function writeConfig(config){
- if(existsSync(CONFIG))throw Error("Temporary build configuration already exists; refusing to overwrite.");
- mkdirSync(dirname(CONFIG),{recursive:true,mode:0o700});
+ if(existsSync(CONFIG))throw Error("Staging temporary Wrangler config exists; refusing overwrite");
  writeFileSync(CONFIG,JSON.stringify(config,null,2)+"\n",{flag:"wx",mode:0o600});
 }
-function ensureOriginalSigner(){
- const raw=wrangler(["secret","list","--config",CONFIG],{capture:true});
+function originalSecretExists(){
  let items;
- try{items=JSON.parse(raw);}catch{throw Error("Cannot inspect existing Cloudflare Worker secrets");}
+ try{items=JSON.parse(wrangler(["secret","list","--config",CONFIG],{capture:true}));}
+ catch{throw Error("Unable to verify the existing Worker private signing secret");}
  if(!Array.isArray(items)||!items.some(x=>x?.name==="COMMAND_PRIVATE_KEY"))
-  throw Error("Existing command private key is missing: refusing automatic key rotation");
+  throw Error("Original COMMAND_PRIVATE_KEY missing; manual recovery required, no key rotation");
 }
 function buildAssets(){
- console.log("[Build] Generating Control panel assets...");
- // The Native Builds 'Build command' may be left blank.
  const npm=process.platform==="win32"?"npm.cmd":"npm";
- const child=spawnSync(npm,["run","build:web"],{
-  cwd:ROOT,env:process.env,stdio:"inherit"
- });
- if(child.error||child.status!==0)throw Error("Web build failed");
- const index=join(ROOT,"apps","console","dist","index.html");
- if(!existsSync(index))throw Error("Control panel assets were not generated");
+ const res=spawnSync(npm,["run","build:web"],{cwd:ROOT,env:process.env,stdio:"inherit"});
+ if(res.error||res.status!==0)throw Error("Control panel build failed");
+ if(!existsSync(join(ROOT,"apps","console","dist","index.html")))
+  throw Error("Built React assets are missing");
+}
+function migrate(){
+ wrangler(["d1","migrations","apply",DB,"--remote","--config",CONFIG]);
+}
+function deploy(){
+ wrangler(["deploy","--config",CONFIG]);
+}
+function initialize(template){
+ const params=newCloudflareBootstrap(process.env);
+ console.log("Control hostname: "+params.controlHost);
+ console.log("Agent hostname:   "+params.agentHost);
+ console.log("Access remains hostname-based: CONTROL ONLY. Never use Worker-level Access.");
+ // The classification has already checked that NO staging D1 exists.
+ // This is the only command that ever creates a D1 database.
+ wrangler(["d1","create",DB]);
+ const created=findStagingDatabase(databaseList(),DB);
+ if(!created)throw Error("New D1 is not visible. Stop; DO NOT rerun to rotate the signer.");
+ const signer=generateCommandSigner();
+ const cfg=buildSingleConfig(template,{...params,dbId:created.id,publicKey:signer.publicKey});
+ writeConfig(cfg);
+ console.log("[Staging] Created one D1 and prepared one Worker with SSH writes locked.");
+ try{
+  migrate();
+  deploy();
+  // Private signer exists ONLY in Node process memory and Cloudflare Secret.
+  wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG],{
+   input:signer.privateKeyPkcs8Base64+"\n"
+  });
+  originalSecretExists();
+ }catch(err){
+  console.error("First deployment did not finish. The Staging D1/Worker may exist.");
+  console.error("DO NOT delete D1 or retry by rotating keys. See recovery section of deployment docs.");
+  throw err;
+ }
+ console.log("INITIAL DEPLOY OK. Original private signer stored in Cloudflare only.");
+}
+function update(template,remote,dbs){
+ const cfg=extractExistingStagingWorker(template,remote,dbs);
+ writeConfig(cfg);
+ console.log("[Staging] Reusing existing Worker, domains, Access, D1, DO and public signer.");
+ originalSecretExists();
+ migrate();
+ deploy();
+ console.log("UPDATE OK. No new D1 and no signing key rotation.");
 }
 async function main(){
- if(process.argv.length!==2)throw Error("Run: npm run cf:deploy (no arguments)");
+ if(process.argv.length!==2)throw Error("Use npm run cf:deploy without arguments");
  const branch=process.env.WORKERS_CI_BRANCH||process.env.GITHUB_REF_NAME;
- if(branch&&branch!=="main")throw Error("Refusing to deploy Staging from a non-main branch.");
+ if(branch&&branch!=="main")throw Error("Only main may deploy Staging; previews are disabled");
+ if(Number(process.versions.node.split(".")[0])<22)throw Error("Node.js 22+ required");
+ // Fail fast before creating any Cloudflare resource if React build fails.
+ buildAssets();
  const id=accountId();
- console.log("[1/4] Reading verified settings from existing Cloudflare staging Worker...");
- const original=await settings(id);
+ const remote=await settings(id);
+ const dbs=databaseList();
+ const mode=classifyWorkerForBootstrap(remote,dbs);
  const template=JSON.parse(readFileSync(TEMPLATE,"utf8"));
- const config=extractExistingStagingWorker(template,original,databases());
- console.log("[2/4] Found original D1, domains and pinned public key; high-risk SSH writes remain off.");
- writeConfig(config);
+ console.log("Cloudflare single-Worker deployment mode: "+mode);
  try{
-  ensureOriginalSigner();
-  buildAssets();
-  console.log("[3/4] Applying only pending Staging D1 migrations...");
-  wrangler(["d1","migrations","apply",DB,"--remote","--config",CONFIG]);
-  console.log("[4/4] Deploying the original single Worker...");
-  wrangler(["deploy","--config",CONFIG]);
+  if(mode==="new")initialize(template);
+  else update(template,remote,dbs);
  }finally{
-  // Non-secret, locally generated file; remove even when build fails.
-  rmSync(CONFIG,{force:true});
+  rmSync(CONFIG,{force:true}); // Non-secret temporary configuration.
  }
- console.log("DEPLOY OK: one Worker, two exact custom domains, original D1 and signer kept.");
- console.log("Cloudflare Access and real VPS T01-T11 must still be checked before production use.");
+ console.log("All SSH high-risk switches remain false; no VPS command was sent.");
+ console.log("Next: verify Control Access on the management hostname and Agent device health.");
 }
-main().catch(e=>{
- console.error("Safe Cloudflare deployment stopped:",e instanceof Error?e.message:String(e));
- console.error("No signing keys rotated, no D1 deleted, no VPS SSH action performed.");
+main().catch(err=>{
+ console.error("Cloudflare Staging deploy safely stopped:",err instanceof Error?err.message:String(err));
+ console.error("No production VPS operation or automatic SSH rollback was performed.");
  process.exitCode=1;
 });
