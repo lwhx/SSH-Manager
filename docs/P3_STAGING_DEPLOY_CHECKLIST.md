@@ -4,7 +4,7 @@
 
 ## Agent 配对与本机权限
 
-原原型配对文件未保存 helper_socket 和 state_dir，导致配对成功后 Agent 无法使用 Root Helper。现已修复：新配对文件保存固定 Socket 路径 /run/ssh-manager/helper.sock，以及 systemd 持久化目录 /var/lib/ssh-manager-agent。旧文件缺少字段时按相同安全默认值加载。非标准 Socket、相对状态目录、非法 Gateway 及不安全私钥权限均拒绝。
+早期原型配对文件未保存 helper_socket 和 state_dir，导致配对成功后 Agent 无法使用 Root Helper。现已修复：新配对文件保存固定 Socket 路径 /run/ssh-manager/helper.sock，以及 systemd 持久化目录 /var/lib/ssh-manager-agent。旧文件缺少字段时按相同安全默认值加载。非标准 Socket、相对状态目录、非法 Gateway 及不安全私钥权限均拒绝。
 
 - 隔离 VPS 应先建立无登录权限的 ssh-manager 系统账户。
 - 标准配对文件位于 /etc/ssh-manager/agent.json，由 ssh-manager:ssh-manager 持有，权限 0600。
@@ -36,9 +36,23 @@
 | Root Ed25519 签名、nonce、防重放、Unix Socket 的内核 UID/PID | Go 测试通过 |
 | Agent 配对文件、状态目录、权限及安全路径 | Go 测试覆盖 |
 | D1 事务更新、审计归属、故障回滚与重复上报 | SQLite 测试覆盖 |
+| **真实本地 workerd + D1**：Agent 设备签名、Root 签名、重放、VERIFIED、审计故障回滚 | **CI 已通过（仅本地）** |
 | 真实 Ubuntu/Debian VPS 的 journald 认证事件 PID 归属 | 尚未实机验收 |
 | 真实 Cloudflare Worker/DO/D1 全链路 | 尚未联调 |
 | Windows PowerShell 到隔离 VPS 的完整 SSH 证明 | 尚未验收 |
 | P4 手动关闭密码登录、救援、公钥撤销、手动回滚 | 尚未开发，继续锁定 |
+
+## 本地 Worker + D1 验收复现
+
+在仓库根目录安装 Node.js 与依赖后，只允许使用本地开关运行：
+
+```bash
+npm install
+node scripts/test_gateway_workerd.mjs --local-only
+```
+
+测试脚本通过 Wrangler 临时配置、独立 D1、仅在进程内存在的测试设备/Root Ed25519 私钥，启动监听 127.0.0.1 的真实 Worker。使用数据库故障注入验证事务回滚，然后清理临时状态。不会接触生产 D1 或 VPS。
+
+**尚未覆盖：** 真实 Cloudflare 远端 Worker/DO/D1、不同 Linux 发行版的可信 journald PID 和进程链、Windows PowerShell 完整 SSH 新连接、真实断电和云端超时恢复。未完成这些验收不得开放 P4。
 
 当前 PR 保持 Draft，主分支不合并，绝不在未经授权的生产 VPS 上执行命令。
