@@ -142,7 +142,7 @@ def effective_options(raw: str) -> dict[str, str]:
     return parsed
 
 
-def journal_check(records: str, login_user: str) -> tuple[int, int]:
+def journal_check(records: str, login_user: str, source_ip: str | None = None) -> tuple[int, int]:
     """Count trusted *candidates*, not successful attested sessions."""
     accepted, unsafe = 0, 0
     for line in records.splitlines():
@@ -160,7 +160,7 @@ def journal_check(records: str, login_user: str) -> tuple[int, int]:
         uid = entry.get('_UID')
         pid = str(entry.get('_PID', ''))
         match = EVENT.fullmatch(message)
-        if source in {'syslog', 'journal'} and executable in SSH_IDENTITIES and uid == '0' and pid.isdigit() and int(pid) > 1 and match and match.group('user') == login_user:
+        if source in {'syslog', 'journal'} and executable in SSH_IDENTITIES and uid == '0' and pid.isdigit() and int(pid) > 1 and match and match.group('user') == login_user and (source_ip is None or match.group('ip') == source_ip):
             accepted += 1
         else:
             unsafe += 1
@@ -266,7 +266,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if rc:
         add('trusted_journal', 'WARN', 'journalctl unavailable or permission denied')
     else:
-        good, other = journal_check(logs, args.login_user)
+        good, other = journal_check(logs, args.login_user, args.client_ip)
         if good:
             add('trusted_journal', 'PASS', 'trusted SSH accepted-publickey candidates exist (not an attestation)')
         elif other:

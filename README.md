@@ -158,4 +158,4 @@ GitHub Actions 的 control job 运行 `node scripts/test_gateway_workerd.mjs --l
 
 ### P3.4 独立 Staging VPS 只读准入检查
 
-已新增 [只读 readiness 检查](scripts/staging_readiness.py) 和 [P3.4 Staging E2E 验收矩阵](docs/P3_STAGING_E2E_ACCEPTANCE.md)，要求显式提供当前选中的单台 VPS node UUID、登录用户、SSH 来源/本地 IP 与端口。检查 systemd 服务账户、私钥文件权限、Root Helper 的非敏感节点配置、Socket 属组/0660、可信 journald 和 OpenSSH 有效策略。退出码 0=全部 PASS、2=FAIL、3=仅 WARN；**不读取私钥、不更改 SSH，也不自行设为 VERIFIED**。CI 运行对应 8 项 Python 单元测试。
+已新增 [只读 readiness 检查](scripts/staging_readiness.py) 和 [P3.4 Staging E2E 验收矩阵](docs/P3_STAGING_E2E_ACCEPTANCE.md)，要求显式提供当前选中的单台 VPS node UUID、登录用户、SSH 来源/本地 IP 与端口。检查 systemd 服务账户、私钥文件权限、Root Helper 的非敏感节点配置、Socket 属组/0660、可信 journald 和 OpenSSH 有效策略。退出码 0=全部 PASS、2=FAIL、3=仅 WARN；**不读取私钥、不更改 SSH，也不自行设为 VERIFIED**。CI 运行对应 9 项 Python 单元测试，且可信日志候选来源 IP 需要匹配本次指定的 SSH 客户端 IP。

@@ -25,6 +25,8 @@ class CollectorTests(unittest.TestCase):
         source = {'_EXE': '/usr/sbin/sshd', '_UID': '0', '_PID': '1420',
                   '_TRANSPORT': 'syslog', 'MESSAGE': event}
         self.assertEqual(sr.journal_check(json.dumps(source), 'root'), (1, 0))
+        self.assertEqual(sr.journal_check(json.dumps(source), 'root', '192.0.2.99'), (1, 0))
+        self.assertEqual(sr.journal_check(json.dumps(source), 'root', '203.0.113.7'), (0, 1))
         for alteration in ({'_TRANSPORT': 'stdout'}, {'_UID': '1000'},
                            {'_PID': '0'}, {'_EXE': '/usr/bin/logger'},
                            {'MESSAGE': event.replace('root', 'admin')},
