@@ -12,7 +12,7 @@ const acceptedMessage="Accepted publickey for root from 203.0.113.9 port 52133 s
 func TestTrustedJournalAndMatching(t *testing.T){
  started:=time.Unix(1793440000,0)
  data,_:=json.Marshal(map[string]string{
-  "MESSAGE":acceptedMessage,"_EXE":"/usr/sbin/sshd","_UID":"0","_PID":"1548","_TRANSPORT":"syslog","_TRANSPORT":"syslog",
+  "MESSAGE":acceptedMessage,"_EXE":"/usr/sbin/sshd","_UID":"0","_PID":"1548","_TRANSPORT":"syslog",
   "__REALTIME_TIMESTAMP":fmt.Sprint(started.Add(time.Second*7).UnixMicro()),
  })
  got,err:=ParseTrustedJournal(data)
@@ -24,7 +24,7 @@ func TestTrustedJournalAndMatching(t *testing.T){
 }
 func TestRejectsSpoofedOrIncompleteJournal(t *testing.T){
  original:=map[string]string{
-  "MESSAGE":acceptedMessage,"_EXE":"/usr/sbin/sshd","_UID":"0","_PID":"1548",
+  "MESSAGE":acceptedMessage,"_EXE":"/usr/sbin/sshd","_UID":"0","_PID":"1548","_TRANSPORT":"syslog",
   "__REALTIME_TIMESTAMP":"1793440007000000",
  }
  for name,patch:=range map[string]func(map[string]string){
