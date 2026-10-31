@@ -64,7 +64,7 @@ func (a *Agent) request(ctx context.Context,path string,body any)([]byte,error){
  req.Header.Set("X-Device-Signature",encode(ed25519.Sign(a.secret,[]byte(message))))
  res,err:=a.http.Do(req);if err!=nil{return nil,err};defer res.Body.Close()
  b,err:=io.ReadAll(io.LimitReader(res.Body,65536));if err!=nil{return nil,err}
- if res.StatusCode!=200{return nil,fmt.Errorf("gateway status %d: %s",res.StatusCode,b)}
+ if res.StatusCode!=200{return nil,parseGatewayHTTPError(res.StatusCode,b)}
  return b,nil
 }
 func readConfig(path string)(Config,ed25519.PrivateKey,error){

@@ -42,23 +42,45 @@ func (a *Agent)localProofCall(ctx context.Context,request map[string]string)(loc
 // Forward a root-signed proof; the Agent may relay but cannot forge the
 // signing key or produce a VERIFIED result without Cloudflare D1 checks.
 func (a *Agent)drainProofOutbox(ctx context.Context){
- reply,err:=a.localProofCall(ctx,map[string]string{"local_action":"proof.peek"})
- if err!=nil||!reply.OK||reply.Proof.Payload==""{return}
- if len(reply.Proof.Payload)>4096||len(reply.Proof.Signature)>128{
-  log.Print("oversized root SSH proof rejected locally");return
+ // Drain a bounded number of entries each heartbeat, so a permanently
+ // rejected old challenge cannot block a newer one. Never discard on a
+ // timeout, Cloudflare outage, device authentication failure, or 5xx.
+ for tries:=0;tries<4&&ctx.Err()==nil;tries++{
+  reply,err:=a.localProofCall(ctx,map[string]string{"local_action":"proof.peek"})
+  if err!=nil||!reply.OK||reply.Proof.Payload==""{return}
+  if len(reply.Proof.Payload)>4096||len(reply.Proof.Signature)>128{
+   log.Print("oversized root SSH proof requires manual review");return
+  }
+  var body struct{
+   ProofID string `json:"proof_id"`
+  }
+  if json.Unmarshal([]byte(reply.Proof.Payload),&body)!=nil||!proofIDRE.MatchString(body.ProofID){
+   log.Print("invalid root SSH proof outbox entry requires manual review");return
+  }
+  _,err=a.request(ctx,"/agent/v1/ssh-proof",map[string]string{
+   "payload":reply.Proof.Payload,"signature":reply.Proof.Signature,
+  })
+  if err!=nil{
+   if reason,permanent:=permanentProofRejection(err);permanent{
+    saved,storeErr:=a.localProofCall(ctx,map[string]string{
+     "local_action":"proof.quarantine","proof_id":body.ProofID,"reason":reason,
+    })
+    if storeErr!=nil||!saved.OK||saved.Code!="PROOF_QUARANTINED"{
+     log.Printf("cannot safely quarantine terminal proof response: %v",storeErr)
+     return
+    }
+    log.Printf("terminally rejected SSH proof %s quarantined root-only (%s)",body.ProofID,reason)
+    continue
+   }
+   log.Printf("root proof pending: retryable or unknown cloud response: %v",err)
+   return
+  }
+  ack,ackErr:=a.localProofCall(ctx,map[string]string{
+   "local_action":"proof.ack","proof_id":body.ProofID,
+  })
+  if ackErr!=nil||!ack.OK||ack.Code!="ACK_RECORDED"{
+   log.Printf("root proof acknowledgement deferred: %v",ackErr)
+   return
+  }
  }
- var body struct{
-  ProofID string `json:"proof_id"`
- }
- if json.Unmarshal([]byte(reply.Proof.Payload),&body)!=nil||!proofIDRE.MatchString(body.ProofID){
-  log.Print("malformed root proof outbox");return
- }
- if _,err=a.request(ctx,"/agent/v1/ssh-proof",map[string]string{
-  "payload":reply.Proof.Payload,"signature":reply.Proof.Signature,
- });err!=nil{
-  log.Printf("root proof forwarding pending (will retry until control-plane decision): %v",err)
-  return
- }
- _,err=a.localProofCall(ctx,map[string]string{"local_action":"proof.ack","proof_id":body.ProofID})
- if err!=nil{log.Printf("root proof acknowledgement deferred: %v",err)}
 }

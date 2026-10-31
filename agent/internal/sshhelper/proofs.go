@@ -78,6 +78,51 @@ func(o *Outbox)Peek()(sshproof.SignedAttestation,error){
  }
  return result,os.ErrNotExist
 }
+// Quarantine preserves permanently rejected proofs under a private root-only
+// directory, rather than deleting them or blocking newer challenges. Only
+// explicit terminal gateway error codes are permitted as reasons.
+func(o *Outbox)Quarantine(proofID,reason string)error{
+ if !uuidRE.MatchString(proofID){return errors.New("invalid rejected proof ID")}
+ switch reason{
+ case "CHALLENGE_NOT_ACTIVE","CHALLENGE_CONTEXT_CHANGED","PROOF_ALREADY_USED_OR_CONTEXT_CHANGED":
+ default:return errors.New("untrusted proof quarantine reason")
+ }
+ if err:=o.validate();err!=nil{return err}
+ src:=filepath.Join(o.Directory,proofID+".json")
+ st,err:=os.Lstat(src)
+ if err!=nil{return err}
+ owner,ok:=st.Sys().(*syscall.Stat_t)
+ if !ok||owner.Uid!=0||!st.Mode().IsRegular()||st.Mode().Perm()&0077!=0{
+  return errors.New("unsafe rejected proof source")
+ }
+ dead:=filepath.Join(o.Directory,"rejected")
+ if err=os.Mkdir(dead,0700);err!=nil&&!errors.Is(err,os.ErrExist){return err}
+ meta,err:=os.Lstat(dead)
+ if err!=nil{return err}
+ deadOwner,ok:=meta.Sys().(*syscall.Stat_t)
+ if !ok||!meta.IsDir()||meta.Mode().Perm()&0077!=0||deadOwner.Uid!=0{
+  return errors.New("unsafe root-only rejected proof directory")
+ }
+ dest:=filepath.Join(dead,proofID+".json")
+ if _,err=os.Lstat(dest);err==nil{
+  return errors.New("rejected proof ID already archived")
+ }else if !errors.Is(err,os.ErrNotExist){return err}
+ if err=os.Rename(src,dest);err!=nil{return err}
+ f,err:=os.OpenFile(filepath.Join(dead,proofID+".reason"),os.O_CREATE|os.O_EXCL|os.O_WRONLY,0600)
+ if err!=nil{return err}
+ if _,err=f.WriteString(reason+"\n");err!=nil{_ = f.Close();return err}
+ if err=f.Sync();err!=nil{_ = f.Close();return err}
+ if err=f.Close();err!=nil{return err}
+ for _,name:=range []string{dead,o.Directory}{
+  directory,err:=os.Open(name)
+  if err!=nil{return err}
+  err=directory.Sync()
+  _=directory.Close()
+  if err!=nil{return err}
+ }
+ return nil
+}
+
 func(o *Outbox)Ack(proofID string)error{
  if !uuidRE.MatchString(proofID){return errors.New("invalid proof id")}
  if err:=o.validate();err!=nil{return err}

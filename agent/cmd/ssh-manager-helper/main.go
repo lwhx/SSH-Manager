@@ -80,6 +80,7 @@ func handle(conn *net.UnixConn,uid uint32,helper *sshhelper.Handler){
   var local struct{
    LocalAction string `json:"local_action"`
    ProofID string `json:"proof_id"`
+   Reason string `json:"reason"`
   }
   if json.Unmarshal(request,&local)==nil&&local.LocalAction!=""{
    if !helper.Config.EnableSSHProof||helper.Outbox==nil{
@@ -99,6 +100,13 @@ func handle(conn *net.UnixConn,uid uint32,helper *sshhelper.Handler){
    case "proof.ack":
     e:=helper.Outbox.Ack(local.ProofID)
     _=json.NewEncoder(conn).Encode(map[string]any{"ok":e==nil,"code":"ACK_RECORDED"})
+   case "proof.quarantine":
+    e:=helper.Outbox.Quarantine(local.ProofID,local.Reason)
+    if e!=nil{
+     _=json.NewEncoder(conn).Encode(map[string]any{"ok":false,"code":"QUARANTINE_FAILED"})
+     return
+    }
+    _=json.NewEncoder(conn).Encode(map[string]any{"ok":true,"code":"PROOF_QUARANTINED"})
    default:
     _=json.NewEncoder(conn).Encode(map[string]any{"ok":false,"code":"ACTION_DENIED"})
    }
