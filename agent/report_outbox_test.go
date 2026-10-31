@@ -86,3 +86,31 @@ func TestReportOutboxRejectsSymlinksAndUnsafePermissions(t *testing.T){
   t.Fatal("symlinked persisted report accepted")
  }
 }
+
+func TestStaleOperationReceiptIsArchivedAndNextReportCanComplete(t *testing.T){
+ server:=httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  if r.URL.Path!="/agent/v1/report"{w.WriteHeader(404);return}
+  w.Header().Set("Content-Type","application/json")
+  _,_=w.Write([]byte(`{"accepted":true}`))
+ }))
+ defer server.Close()
+ agent:=newReportTestAgent(t,server.URL,server.Client())
+ first:="10000000-0000-4000-8000-000000000001"
+ second:="20000000-0000-4000-8000-000000000001"
+ if err:=agent.enqueueOperationReport(first,"SUCCEEDED","VERIFICATION_PREPARED",nil);err!=nil{t.Fatal(err)}
+ if err:=agent.enqueueOperationReport(second,"SUCCEEDED","POLICY_INSPECTED",nil);err!=nil{t.Fatal(err)}
+ if err:=agent.quarantineOperationReport(first,"VERIFICATION_PREPARATION_STALE");err!=nil{t.Fatal(err)}
+ archived:=filepath.Join(agent.config.StateDir,"reports","rejected",first+".json")
+ if _,err:=os.Stat(archived);err!=nil{t.Fatal("stale report was not preserved for audit",err)}
+ reason,err:=os.ReadFile(filepath.Join(agent.config.StateDir,"reports","rejected",first+".reason"))
+ if err!=nil||string(reason)!="VERIFICATION_PREPARATION_STALE
+"{t.Fatal("archive reason missing")}
+ if err:=agent.quarantineOperationReport(second,"NETWORK_UNAVAILABLE");err==nil{
+  t.Fatal("network outage must not discard operation result")
+ }
+ agent.drainOperationReports(context.Background())
+ if _,err:=os.Stat(filepath.Join(agent.config.StateDir,"reports",second+".json"));!errors.Is(err,os.ErrNotExist){
+  t.Fatal("second report blocked by archived old operation")
+ }
+ if _,err:=os.Stat(archived);err!=nil{t.Fatal("archived old report was deleted",err)}
+}
