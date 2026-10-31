@@ -3,7 +3,7 @@ import{createRoot}from"react-dom/client";
 import "./style.css";
 type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:string;status:string;init_stage:string;last_seen_at?:number;config_revision:string};
 type KeyInfo={id:string;purpose:string;fingerprint:string;public_key:string;version:number;name:string};
-type VerificationInfo={id:string;status:string;expires_at:number;fingerprint:string;login_user:string;token?:string};
+type VerificationInfo={id:string;status:string;expires_at:number;fingerprint:string;login_user:string;token?:string;prepared_at?:number|null};
 async function api<T>(path:string,method="GET",data?:unknown,headers?:Record<string,string>):Promise<T>{
  const res=await fetch("/api/v1"+path,{method,headers:{"Content-Type":"application/json",...headers},body:data?JSON.stringify(data):undefined,credentials:"same-origin"});
  const result:any=await res.json();
@@ -42,10 +42,10 @@ function App(){
   let running=true;
   const update=async()=>{
    try{
-    const reply=await api<{verification:{id:string;status:string;expires_at:number}}>(
+    const reply=await api<{verification:{id:string;status:string;expires_at:number;prepared_at?:number|null}}>(
       "/nodes/"+selected.id+"/ssh-verification/"+verification.id);
     if(running)setVerification(previous=>previous&&previous.id===reply.verification.id?
-      {...previous,status:reply.verification.status,expires_at:reply.verification.expires_at}:previous);
+      {...previous,status:reply.verification.status,expires_at:reply.verification.expires_at,prepared_at:reply.verification.prepared_at}:previous);
    }catch(e){if(running)alertError(e);}
   };
   void update();
@@ -104,11 +104,12 @@ function App(){
   await act(async()=>{
    const result=await api<{
     verification_id:string;token:string;expires_at:number;
-    login_user:string;fingerprint:string;status:string;trusted_proof_available:boolean;
+    login_user:string;fingerprint:string;status:string;trusted_proof_available:boolean;preparation_operation_id:string;
    }>("/nodes/"+node.id+"/ssh-verification/start","POST",{});
    setVerification({id:result.verification_id,status:result.status,expires_at:result.expires_at,
-     login_user:result.login_user,fingerprint:result.fingerprint,token:result.token});
-   setMessage("已生成5分钟一次性挑战；当前仍缺服务器可信认证证据组件，不会自动判定 SSH 登录成功。");
+     login_user:result.login_user,fingerprint:result.fingerprint,token:result.token,prepared_at:null});
+   setOperation(result.preparation_operation_id);setOperationState(null);
+   setMessage("挑战已签发，正在请求当前 VPS 的 Root Helper 本地准备；这不代表 SSH 登录验证成功。");
   });
  }
  async function cancelVerification(node:NodeInfo){
@@ -135,6 +136,7 @@ function App(){
   onClick={()=>void beginVerification(selected)}>生成单节点验证挑战（5分钟）</button>
  {verification&&<div className="hint">
   <strong>验证任务：{verification.status}</strong>
+  <p>VPS 本机挑战准备：{verification.prepared_at?"已确认准备完成":"尚未收到成功回执"}</p>
   <p>对应用户：{verification.login_user}</p>
   <p>目标公钥：{verification.fingerprint}</p>
   <p>到期：{new Date(verification.expires_at*1000).toLocaleString()}</p>
