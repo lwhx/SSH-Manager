@@ -4,6 +4,7 @@ package sshkeys
 
 import (
  "bytes"
+ "bufio"
  "sync"
  "crypto/rand"
  "encoding/hex"
@@ -149,6 +150,52 @@ func TestLocalSSHDIntegration(t *testing.T){
   if err=sshproof.Match(event,candidate);err==nil{seen=true;break}
  }
  if !seen{t.Fatalf("no matching sshd accepted-publickey event tied to this SSH session; log: %s",serverLog.String())}
+
+ // Real OpenSSH process-tree compatibility check. This deliberately uses
+ // a NEW SSH session and reads /proc while the remote login shell is alive.
+ // It cannot establish journald _PID provenance, which still needs Staging.
+ var lineageErr bytes.Buffer
+ lineage:=exec.Command("ssh",
+  "-T","-p",strconv.Itoa(port),
+  "-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","IdentityAgent=none",
+  "-o","PreferredAuthentications=publickey","-o","PasswordAuthentication=no",
+  "-o","KbdInteractiveAuthentication=no","-o","ControlMaster=no",
+  "-o","ControlPath=none","-o","ConnectTimeout=3",
+  "-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+knownHosts,
+  "-i",clientKey,username+"@127.0.0.1",
+  "printf 'VERIFY_PID=%s\\n' \"$\"; sleep 5")
+ stdout,err:=lineage.StdoutPipe()
+ if err!=nil{t.Fatal(err)}
+ lineage.Stderr=&lineageErr
+ if err=lineage.Start();err!=nil{t.Fatal(err)}
+ defer func(){if lineage.Process!=nil{_ = lineage.Process.Kill();_=lineage.Wait()}}()
+ scanner:=bufio.NewScanner(stdout)
+ if !scanner.Scan(){t.Fatalf("no remote process PID: %v %s",scanner.Err(),lineageErr.String())}
+ line:=strings.TrimSpace(scanner.Text())
+ if !strings.HasPrefix(line,"VERIFY_PID="){t.Fatalf("unexpected SSH lineage output: %q",line)}
+ remotePID,err:=strconv.Atoi(strings.TrimPrefix(line,"VERIFY_PID="))
+ if err!=nil||remotePID<2{t.Fatalf("invalid remote SSH process PID: %q",line)}
+ var lineagePaths []string
+ foundRootSSHD:=false
+ current:=remotePID
+ for depth:=0;depth<32&&current>1;depth++{
+  proc,readErr:=sshproof.ReadLinuxProcess(current)
+  if readErr!=nil{t.Fatalf("OpenSSH process chain unavailable pid=%d: %v",current,readErr)}
+  lineagePaths=append(lineagePaths,fmt.Sprintf("%d:%d:%d:%s",proc.PID,proc.PPID,proc.RealUID,proc.Executable))
+  if proc.RealUID==0&&(strings.HasSuffix(proc.Executable,"/sshd")||
+    strings.HasSuffix(proc.Executable,"/sshd-session")){
+   candidate:=sshproof.Event{PID:proc.PID,SourcePath:proc.Executable}
+   if err=sshproof.MatchSSHDAncestor(remotePID,candidate,sshproof.ReadLinuxProcess);err==nil{
+    foundRootSSHD=true
+    break
+   }
+  }
+  current=proc.PPID
+ }
+ t.Logf("real SSH kernel ancestry: %s",strings.Join(lineagePaths," -> "))
+ if !foundRootSSHD{
+  t.Fatal("OpenSSH login process lacks trusted root sshd ancestor; require explicit compatibility review")
+ }
 
  if _,err:=sshAttempt(wrongKey);err==nil{t.Fatal("wrong private key unexpectedly authenticated")}
  effective,err:=exec.Command("/usr/sbin/sshd","-T","-f",conf,"-C",
