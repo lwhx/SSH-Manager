@@ -34,22 +34,30 @@ async function verifyDevice(req:Request,env:Env):Promise<string>{
 async function pair(req:Request,env:Env):Promise<Response>{
   const b=await jsonBody(req);
   const id=String(b.node_id||""),token=String(b.token||""),key=String(b.public_key||"");
-  must(validNodeId(id)&&token.length>=32&&key.length>20,"INVALID_PAIRING");
-  let raw:Uint8Array;
-  try{raw=decodeBase64url(key);}catch{throw new ApiError("INVALID_DEVICE_KEY");}
+  must(validNodeId(id)&&token.length>=32&&token.length<=150&&key.length>20,"INVALID_PAIRING");
+  let raw:Uint8Array,signer:Uint8Array;
+  try{raw=decodeBase64url(key);signer=decodeBase64url(env.COMMAND_PUBLIC_KEY||"");}
+  catch{throw new ApiError("INVALID_DEVICE_KEY_OR_SIGNER");}
   must(raw.byteLength===32,"INVALID_DEVICE_KEY");
-  const digest=await sha256hex(token);
-  const t=now();
-  // Consume the token atomically, preventing multiple device identities.
-  const result=await env.DB.prepare("UPDATE pairing_tokens SET used_at=? WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>?").bind(t,id,digest,t).run();
-  must(result.meta.changes===1,"INVALID_OR_EXPIRED_PAIRING",403);
+  // Do not consume the only recovery token if deployment is misconfigured.
+  must(signer.byteLength===32,"SIGNER_NOT_CONFIGURED",503);
   const existing=await env.DB.prepare("SELECT node_id FROM agent_credentials WHERE node_id=?").bind(id).first();
   must(!existing,"NODE_ALREADY_PAIRED",409);
-  await env.DB.batch([
-    env.DB.prepare("INSERT INTO agent_credentials(node_id,public_key,paired_at) VALUES (?,?,?)").bind(id,key,t),
-    env.DB.prepare("UPDATE nodes SET status='online',init_stage='PREFLIGHT',last_seen_at=? WHERE id=?").bind(t,id)
-  ]);
-  must(env.COMMAND_PUBLIC_KEY&&env.COMMAND_PUBLIC_KEY.startsWith("REPLACE")===false,"SIGNER_NOT_CONFIGURED",503);
+  const digest=await sha256hex(token),t=now();
+  const statements=[
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO agent_credentials(node_id,public_key,paired_at) SELECT ?,?,? WHERE EXISTS "+
+      "(SELECT 1 FROM pairing_tokens WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)"
+    ).bind(id,key,t,id,digest,t),
+    env.DB.prepare("UPDATE pairing_tokens SET used_at=? WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>?")
+      .bind(t,id,digest,t),
+    env.DB.prepare("UPDATE nodes SET status='online',init_stage='PREFLIGHT',last_seen_at=? WHERE id=? AND EXISTS "+
+      "(SELECT 1 FROM agent_credentials WHERE node_id=? AND public_key=?)").bind(t,id,id,key)
+  ];
+  // D1 batch is transactional: pairing token consumption and device binding
+  // cannot be partially committed on DB failures.
+  const [added,consumed]=await env.DB.batch(statements);
+  must(added.meta.changes===1&&consumed.meta.changes===1,"INVALID_OR_EXPIRED_PAIRING",403);
   return response({node_id:id,command_signing_public_key:env.COMMAND_PUBLIC_KEY},201);
 }
 async function authenticated(req:Request,env:Env):Promise<Response>{
@@ -62,6 +70,7 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     return response({ok:true,server_time:now()});
   }
   if(p==="/agent/v1/poll"){
+    await env.DB.prepare("UPDATE operations SET status='EXPIRED' WHERE node_id=? AND status='CREATED' AND expires_at<=?").bind(id,now()).run();
     const op=await env.DB.prepare("SELECT * FROM operations WHERE node_id=? AND status='CREATED' AND expires_at>? ORDER BY created_at ASC LIMIT 1").bind(id,now()).first<any>();
     if(!op)return response({command:null});
     const taken=await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(op.id).run();
@@ -72,17 +81,27 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     const b=await jsonBody(req);
     const opId=String(b.operation_id||""),status=String(b.status||"");
     must(validNodeId(opId)&&["RUNNING","SUCCEEDED","FAILED"].includes(status),"INVALID_REPORT");
-    const op=await env.DB.prepare("SELECT id,action,status FROM operations WHERE id=? AND node_id=?").bind(opId,id).first<any>();
+    const op=await env.DB.prepare("SELECT id,action,status,operator_id,command_json FROM operations WHERE id=? AND node_id=?").bind(opId,id).first<any>();
     must(op,"OPERATION_NOT_FOUND",404);
-    must(["CREATED","DISPATCHED","RUNNING"].includes(op.status),"OPERATION_FINALIZED",409);
+    const allowed=status==="RUNNING"?["DISPATCHED"]:["DISPATCHED","RUNNING"];
+    must(allowed.includes(op.status),"INVALID_STATUS_TRANSITION",409);
     const detail=JSON.stringify(b.detail||{}).slice(0,3500);
-    await env.DB.prepare("UPDATE operations SET status=?,result_code=?,detail=?,finished_at=? WHERE id=?")
-      .bind(status,String(b.result_code||"").slice(0,64),detail,status==="RUNNING"?null:now(),opId).run();
+    const changes=await env.DB.prepare("UPDATE operations SET status=?,result_code=?,detail=?,finished_at=? WHERE id=? AND node_id=? AND status IN ("+
+      allowed.map(()=>"?").join(",")+")")
+      .bind(status,String(b.result_code||"").slice(0,64),detail,status==="RUNNING"?null:now(),opId,id,...allowed).run();
+    must(changes.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
-      const cmd=await env.DB.prepare("SELECT command_json FROM operations WHERE id=?").bind(opId).first<{command_json:string}>();
-      const c=JSON.parse(cmd!.command_json);
-      await env.DB.prepare("INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) VALUES (?,?,?,?,'daily','installed')").bind(crypto.randomUUID(),id,c.payload.key_id,c.payload.login_user).run();
+      const c=JSON.parse(op.command_json);
+      // Future privileged helper results must include exact installed fingerprint.
+      must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
+        "INSTALL_PROOF_MISSING",409);
+      await env.DB.prepare("INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) VALUES (?,?,?,?,'daily','installed')")
+        .bind(crypto.randomUUID(),id,c.payload.key_id,c.payload.login_user).run();
       await env.DB.prepare("UPDATE nodes SET init_stage='WAITING_VERIFICATION' WHERE id=?").bind(id).run();
+    }
+    if(status!=="RUNNING"){
+      await env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,?,?,?,?,?,?)")
+        .bind(crypto.randomUUID(),op.operator_id,id,op.action,opId,status,String(b.result_code||"").slice(0,64),now()).run();
     }
     return response({accepted:true});
   }

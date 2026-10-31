@@ -119,7 +119,17 @@ async function handle(req:Request,env:Env):Promise<Response>{
       await env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
         .bind(id,node.id,cmd.action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45).run();
       await audit(env,a,node.id,cmd.action,"requested",null,id);
-      try{const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(node.id));await stub.fetch("https://node.internal/dispatch",{method:"POST",body:JSON.stringify(signed)});}catch{ /* HTTPS polling is the fallback */ }
+      // Reserve delivery before WSS dispatch. If no websocket received it,
+      // safely release to HTTPS poll; a completed command is never re-queued.
+      try{
+        await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(id).run();
+        const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(node.id));
+        const delivered=await stub.fetch("https://node.internal/dispatch",{method:"POST",body:JSON.stringify(signed)});
+        const value=await delivered.json() as {delivered?:number};
+        if(!value.delivered)await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
+      }catch{
+        await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
+      }
       return response({operation_id:id,status:"CREATED"},202);
     }
     if(sub==="snapshots"&&req.method==="GET"){
