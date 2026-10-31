@@ -4,6 +4,7 @@ package main
 
 import (
  "context"
+ "encoding/base64"
  "crypto/ed25519"
  "flag"
  "encoding/json"
@@ -182,7 +183,10 @@ func main(){
   if err:=os.MkdirAll(filepath.Dir(rootProofKeyPath),0700);err!=nil{log.Fatal(err)}
   public,err:=sshproof.GenerateRootProofKey(rootProofKeyPath)
   if err!=nil{log.Fatal(err)}
-  fmt.Println(public)
+  raw,err:=base64.RawURLEncoding.DecodeString(public)
+  if err!=nil{log.Fatal(err)}
+  fmt.Println("Root proof key (base64url):",public)
+  fmt.Println("Root proof fingerprint:",sshproof.ProofPublicFingerprint(ed25519.PublicKey(raw)))
   return
  }
  conf,err:=loadConfig()
