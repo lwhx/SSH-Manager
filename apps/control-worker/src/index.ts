@@ -435,6 +435,15 @@ async function handle(req:Request,env:Env):Promise<Response>{
       }
       return queueNodeOperation(req,env,a,node,action,payload);
     }
+    if(sub==="rescue/state"&&req.method==="GET"){
+      needRole(a,"admin");
+      const installed=await env.DB.prepare(
+        "SELECT nk.id,nk.public_key_id,nk.login_user,k.fingerprint,k.version "+
+        "FROM node_keys nk JOIN public_keys k ON k.id=nk.public_key_id "+
+        "WHERE nk.node_id=? AND nk.purpose='rescue' AND nk.state='installed' LIMIT 1"
+      ).bind(node.id).first();
+      return response({active:!!installed,installed:installed||null});
+    }
     if(sub==="snapshots"&&req.method==="GET"){
       needRole(a,"admin");const snapshots=await env.DB.prepare("SELECT * FROM ssh_config_snapshots WHERE node_id=? ORDER BY created_at DESC").bind(node.id).all();
       return response({snapshots:snapshots.results});

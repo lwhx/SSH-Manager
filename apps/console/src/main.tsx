@@ -1,6 +1,7 @@
 import React,{useEffect,useState} from "react";
 import{createRoot}from"react-dom/client";
 import "./style.css";
+import ManualOperations from "./ManualOperations";
 type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:string;status:string;init_stage:string;last_seen_at?:number;config_revision:string};
 type KeyInfo={id:string;purpose:string;fingerprint:string;public_key:string;version:number;name:string};
 type VerificationInfo={id:string;status:string;expires_at:number;fingerprint:string;login_user:string;token?:string;prepared_at?:number|null};
@@ -10,7 +11,7 @@ async function api<T>(path:string,method="GET",data?:unknown,headers?:Record<str
  if(!res.ok)throw new Error(result.error||"REQUEST_FAILED");return result;
 }
 function App(){
- const [me,setMe]=useState<{email:string;role:string}|null>(null);
+ const [me,setMe]=useState<{email:string;role:string;manual_ssh_actions_enabled:boolean}|null>(null);
  const [nodes,setNodes]=useState<NodeInfo[]>([]);
  const [keys,setKeys]=useState<KeyInfo[]>([]);
  const [page,setPage]=useState<"dashboard"|"nodes"|"keys"|"audit">("dashboard");
@@ -33,7 +34,7 @@ function App(){
  function alertError(e:unknown){setMessage(e instanceof Error?e.message:String(e));}
  async function refresh(){
   try{
-   const u=await api<{email:string;role:string}>("/me");setMe(u);
+   const u=await api<{email:string;role:string;manual_ssh_actions_enabled:boolean}>("/me");setMe(u);
    const n=await api<{nodes:NodeInfo[]}>("/nodes");setNodes(n.nodes);
    setSelected(previous=>previous?n.nodes.find(node=>node.id===previous.id)||null:null);
    if(u.role!=="viewer"){const k=await api<{keys:KeyInfo[]}>("/keys");setKeys(k.keys);}
@@ -151,7 +152,7 @@ function App(){
  async function loadAudit(){await act(async()=>{setAudit((await api<{entries:any[]}>("/audit")).entries);setPage("audit");});}
  const nav=[["dashboard","仪表盘"],["nodes","VPS 管理"],["keys","双公钥管理"],["audit","操作审计"]] as const;
  return <div className="layout"><aside className="sidebar"><h2>🛡️ SSH Manager</h2><small>Cloudflare · Agent 安全管理</small><nav>{nav.map(([id,title])=><button key={id} className={page===id?"active":""} onClick={()=>{setPage(id);setSelected(null);if(id==="audit")void loadAudit();}}>{title}</button>)}</nav><div className="account">{me?me.email+" · "+me.role:"等待 Cloudflare Access 验证"}</div></aside><main className="main">
- <header><div><h1>{page==="dashboard"?"安全总览":page==="nodes"?"VPS 节点管理":page==="keys"?"SSH 公钥管理":"操作审计"}</h1><p>所有危险 SSH 修改必须人工执行；当前版本尚未启用密码认证变更与救援。</p></div><button className="secondary" onClick={()=>void refresh()}>刷新数据</button></header>
+ <header><div><h1>{page==="dashboard"?"安全总览":page==="nodes"?"VPS 节点管理":page==="keys"?"SSH 公钥管理":"操作审计"}</h1><p>危险 SSH 修改只能逐台人工确认，经 Root Helper 独立签名回执验收，永不自动回滚。</p></div><button className="secondary" onClick={()=>void refresh()}>刷新数据</button></header>
  {message&&<div className="notice" role="status">{message}<button onClick={()=>setMessage("")}>×</button></div>}
  {!me&&<section className="card"><h3>等待 SSH Manager 授权</h3><p>请先通过 Cloudflare Access 使用 GitHub 或 Cloudflare 账户认证。如果这是第二个身份提供方，需要 Owner 从已授权会话生成一次性绑定码。</p><label>5 分钟身份绑定码<input value={linkInput} onChange={e=>setLinkInput(e.target.value)} placeholder="粘贴已授权 Owner 提供的绑定码"/></label><button disabled={busy||!linkInput.trim()} onClick={()=>void claimLink()}>验证并绑定另一登录身份</button></section>}
  {me&&page==="dashboard"&&<><div className="stats"><section className="card"><small>节点总数</small><strong>{nodes.length}</strong></section><section className="card"><small>Agent 在线</small><strong>{nodes.filter(n=>n.status==="online"&&(n.last_seen_at||0)>Date.now()/1000-90).length}</strong></section><section className="card"><small>待验证节点</small><strong>{nodes.filter(n=>n.init_stage!=="COMPLETE").length}</strong></section></div><section className="card"><h3>安全边界</h3><p>日常公钥初始化与可信 SSH 验证是正式关闭密码登录的前置条件。紧急救援公钥仅可由管理员在单台 VPS 上手动启用。当前基础版本不允许任何自动回滚。</p><button onClick={()=>setPage("nodes")}>进入节点管理</button></section></>}
@@ -178,7 +179,9 @@ function App(){
   {verification.status==="PENDING"&&<button className="secondary" disabled={busy}
     onClick={()=>void cancelVerification(selected)}>撤销本次挑战</button>}
  </div>}
- <button disabled className="danger">关闭密码登录（真实 SSH 证明未完成）</button><hr/><h4>单节点紧急救援</h4><p>仅能针对本节点手动操作。不能批量生效。</p><button disabled>临时启用救援公钥（待实现）</button><button disabled>手动恢复密码认证（待实现）</button>{operation&&<div className="hint"><p>任务 ID：{operation}</p><p>实际状态：{operationState?.status||"等待 Agent"} · {operationState?.result_code||""}</p>{operationState?.detail&&<pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{operationState.detail}</pre>}<small>配置检查不能代替可信 SSH 登录验证；安装日常公钥不会关闭密码登录。</small></div>}</section>:<section className="card"><h3>选择一台 VPS</h3><p>操作仅对当前选中的服务器生效。</p></section>}</div></div>}
+ <ManualOperations key={selected.id} node={selected} owner={owner} enabled={!!me.manual_ssh_actions_enabled}
+    rescueKeyAvailable={keys.some(k=>k.purpose==="rescue")}
+    onOperation={id=>{setOperation(id);setOperationState(null);}}/>{operation&&<div className="hint"><p>任务 ID：{operation}</p><p>实际状态：{operationState?.status||"等待 Agent"} · {operationState?.result_code||""}</p>{operationState?.detail&&<pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{operationState.detail}</pre>}<small>配置检查不能代替可信 SSH 登录验证；安装日常公钥不会关闭密码登录。</small></div>}</section>:<section className="card"><h3>选择一台 VPS</h3><p>操作仅对当前选中的服务器生效。</p></section>}</div></div>}
  {me&&page==="keys"&&<div className="columns">{(["daily","rescue"] as const).map(kind=>{const k=keys.find(k=>k.purpose===kind);return <section className="card" key={kind}><h3>{kind==="daily"?"🔑 日常公钥":"🛟 救援公钥"}</h3><p>{kind==="daily"?"只在单节点初始化时授权安装。":"默认不对任何 VPS 生效；保存公钥不会下发救援授权。"}</p>{k?<div className="hint"><strong>{k.name} · v{k.version}</strong><p>{k.fingerprint}</p><code>{k.public_key.slice(0,85)}…</code></div>:<p>尚未设置</p>}{owner&&<><label>粘贴 SSH ED25519 公钥<textarea rows={5} value={keyInput[kind]} onChange={e=>setKeyInput(v=>({...v,[kind]:e.target.value}))} placeholder="ssh-ed25519 AAAAC3..."/></label><button disabled={busy||!keyInput[kind].trim()} onClick={()=>void saveKey(kind)}>保存{kind==="daily"?"日常":"救援"}公钥</button></>}</section>})}</div>}
  {owner&&page==="keys"&&<section className="card"><h3>🔐 绑定第二种登录方式</h3><p>为了防止同邮箱跨身份提供方被自动授予管理员权限，新的 GitHub / Cloudflare Access 身份必须使用已授权 Owner 生成的一次性绑定码完成绑定。</p><button disabled={busy} onClick={()=>void createLink()}>生成 5 分钟身份绑定码</button>{linkToken&&<div className="hint"><code>{linkToken}</code><p>在另一浏览器会话里使用另一身份提供方登录，再粘贴此绑定码。不要分享给其他人。</p></div>}</section>}
  {me&&page==="audit"&&<section className="card"><h3>最近 100 条审计事件</h3>{audit.map((entry,i)=><div className="audit" key={i}><b>{entry.action}</b><span>{entry.node_id||"平台"} · {entry.result}</span><small>{new Date(entry.created_at*1000).toLocaleString()}</small></div>)}{!audit.length&&<p>暂无审计记录或没有权限。</p>}</section>}
