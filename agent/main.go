@@ -69,11 +69,15 @@ func (a *Agent) request(ctx context.Context,path string,body any)([]byte,error){
  return b,nil
 }
 func readConfig(path string)(Config,ed25519.PrivateKey,error){
- b,err:=os.ReadFile(path);if err!=nil{return Config{},nil,err}
+ b,err:=readAgentConfigBytes(path);if err!=nil{return Config{},nil,err}
  var c Config
  if err=json.Unmarshal(b,&c);err!=nil{return c,nil,err}
+ if err=normalizeAgentConfig(&c);err!=nil{return c,nil,err}
  pk,err:=decode(c.DeviceKey);if err!=nil{return c,nil,err}
- if len(pk)!=ed25519.PrivateKeySize{return c,nil,errors.New("invalid device private key")}
+ sign,err:=decode(c.CommandPublicKey);if err!=nil{return c,nil,err}
+ if len(pk)!=ed25519.PrivateKeySize||len(sign)!=ed25519.PublicKeySize{
+  return c,nil,errors.New("invalid device or command signing key")
+ }
  return c,ed25519.PrivateKey(pk),nil
 }
 func (a *Agent) verify(s SignedCommand)(Command,error){
@@ -152,13 +156,12 @@ func pair(ctx context.Context,gateway,node,token,path string)error{
  var result struct{CommandSigningPublicKey string `json:"command_signing_public_key"`}
  if err=json.Unmarshal(b,&result);err!=nil{return err}
  public,err:=decode(result.CommandSigningPublicKey);if err!=nil||len(public)!=ed25519.PublicKeySize{return errors.New("invalid server command signing key")}
- conf:=Config{Gateway:gateway,NodeID:node,DeviceKey:encode(private),CommandPublicKey:result.CommandSigningPublicKey}
- content,_:=json.MarshalIndent(conf,"","  ")
- if err=os.MkdirAll(filepath.Dir(path),0700);err!=nil{return err}
- f,err:=os.OpenFile(path,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600);if err!=nil{return err}
- defer f.Close()
- if _,err=f.Write(content);err!=nil{return err}
- fmt.Println("Device paired. Config stored with mode 0600.");return nil
+ conf:=Config{Gateway:gateway,NodeID:node,DeviceKey:encode(private),
+  CommandPublicKey:result.CommandSigningPublicKey,
+  StateDir:defaultAgentStateDir,HelperSocket:defaultAgentHelperSocket}
+ if err=savePairingConfig(path,conf);err!=nil{return err}
+ fmt.Println("Device paired. Dedicated Agent config stored securely; Helper socket and state directory configured.")
+ return nil
 }
 func main(){
  mode:=flag.String("mode","run","run or pair")

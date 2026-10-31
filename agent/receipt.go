@@ -17,7 +17,7 @@ var errAlreadyClaimed = errors.New("operation already received")
 func (a *Agent) claimOperation(cmd Command)error{
  if !operationID.MatchString(cmd.ID){return errors.New("invalid operation ID")}
  dir:=a.config.StateDir
- if dir==""{dir="/var/lib/ssh-manager"}
+ if dir==""{dir=defaultAgentStateDir}
  dir=filepath.Join(dir,"operations")
  if err:=os.MkdirAll(dir,0700);err!=nil{return err}
  path:=filepath.Join(dir,cmd.ID+".json")
