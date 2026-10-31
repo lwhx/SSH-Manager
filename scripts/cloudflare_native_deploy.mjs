@@ -17,6 +17,7 @@ import {
  extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse,
  newCloudflareBootstrap,classifyWorkerForBootstrap,parseWranglerAuthToken
 } from "./cloudflare_native_lib.mjs";
+import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets} from "./native_security_helpers.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
@@ -114,7 +115,7 @@ function migrate(){
 function deploy(){
  wrangler(["deploy","--config",CONFIG,"--name",NAME]);
 }
-function initialize(template){
+async function initialize(template,id){
  const params=newCloudflareBootstrap(process.env);
  console.log("Control hostname: "+params.controlHost);
  console.log("Agent hostname:   "+params.agentHost);
@@ -132,6 +133,8 @@ function initialize(template){
  try{
   migrate();
   deploy();
+  const deployed=await settings(id);
+  verifyWorkerTargets(deployed,{publicKey:signer.publicKey,databaseId:created.id});
   // Private signer exists ONLY in Node process memory and Cloudflare Secret.
   wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG,"--name",NAME],{
    input:signer.privateKeyPkcs8Base64+"\n"
@@ -144,7 +147,12 @@ function initialize(template){
  }
  console.log("INITIAL DEPLOY OK. Original private signer stored in Cloudflare only.");
 }
-function update(template,remote,dbs){
+async function update(template,remote,dbs,id){
+ const missingSecret=!remote?.bindings?.some(x=>x?.name==="COMMAND_PRIVATE_KEY");
+ if(missingSecret){
+  await repairOrphanedSigner(template,remote,dbs,id);
+  return;
+ }
  const cfg=extractExistingStagingWorker(template,remote,dbs);
  cfg.name=NAME;
  writeConfig(cfg);
@@ -171,8 +179,8 @@ async function main(){
  const template=JSON.parse(readFileSync(TEMPLATE,"utf8"));
  console.log("Cloudflare single-Worker deployment mode: "+mode);
  try{
-  if(mode==="new")initialize(template);
-  else update(template,remote,dbs);
+  if(mode==="new")await initialize(template,id);
+  else await update(template,remote,dbs,id);
  }finally{
   rmSync(CONFIG,{force:true}); // Non-secret temporary configuration.
  }
