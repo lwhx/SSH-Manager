@@ -121,3 +121,12 @@ export function classifyWorkerForBootstrap(settings,d1list){
   throw Error("A nonempty Worker already uses this name; refusing to overwrite its bindings");
  return "new";
 }
+
+export function parseWranglerAuthToken(value){
+ if(!value||(value.type!=="api_token"&&value.type!=="oauth")||
+  typeof value.token!=="string"||value.token.length<16){
+  throw Error("No usable Cloudflare OAuth/API token was available from Wrangler");
+ }
+ // This string MUST stay only in process memory: never print or persist it.
+ return value.token;
+}

@@ -15,7 +15,7 @@ import {spawnSync} from "node:child_process";
 import {buildSingleConfig,findStagingDatabase,generateCommandSigner} from "./cloudflare_quick_lib.mjs";
 import {
  extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse,
- newCloudflareBootstrap,classifyWorkerForBootstrap
+ newCloudflareBootstrap,classifyWorkerForBootstrap,parseWranglerAuthToken
 } from "./cloudflare_native_lib.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
@@ -67,11 +67,7 @@ function authToken(){
   "Cannot access Cloudflare Builds credentials. Select a scoped Build API token "+
   "with Workers Scripts Read/Edit, Workers Routes Edit and D1 Read/Edit permissions.");
  }
- if((data.type!=="api_token"&&data.type!=="oauth")||
-  typeof data.token!=="string"||data.token.length<16){
-  throw Error("Wrangler did not provide usable API token authentication");
- }
- return data.token;
+ return parseWranglerAuthToken(data);
 }
 async function settings(id){
  const token=authToken();

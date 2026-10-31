@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {
  extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse,
- newCloudflareBootstrap,classifyWorkerForBootstrap
+ newCloudflareBootstrap,classifyWorkerForBootstrap,parseWranglerAuthToken
 } from "./cloudflare_native_lib.mjs";
 
 const template=JSON.parse(readFileSync(new URL("../wrangler.single.staging.example.jsonc",import.meta.url),"utf8"));
@@ -114,4 +114,12 @@ test("bootstrap only with empty Worker and no existing Staging D1",()=>{
  assert.throws(()=>classifyWorkerForBootstrap({bindings:[]},list));
  assert.throws(()=>classifyWorkerForBootstrap({bindings:[{name:"COMMAND_PRIVATE_KEY",type:"secret_text"}]},[]));
  assert.throws(()=>classifyWorkerForBootstrap({bindings:[{name:"DB",type:"d1",database_id:UUID}]},[]));
+});
+
+test("Wrangler API token credentials are accepted but secrets are not logged",()=>{
+ const key="secret_token_value_not_to_be_logged";
+ assert.equal(parseWranglerAuthToken({type:"api_token",token:key}),key);
+ assert.equal(parseWranglerAuthToken({type:"oauth",token:key}),key);
+ assert.throws(()=>parseWranglerAuthToken({type:"api_key",key, email:"a@example.com"}));
+ assert.throws(()=>parseWranglerAuthToken({type:"api_token",token:""}));
 });
