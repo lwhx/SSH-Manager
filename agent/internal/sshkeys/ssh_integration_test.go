@@ -4,6 +4,7 @@ package sshkeys
 
 import (
  "bytes"
+ "sync"
  "crypto/rand"
  "encoding/hex"
  "fmt"
@@ -16,7 +17,17 @@ import (
  "strings"
  "testing"
  "time"
+
+ "github.com/lwhx/SSH-Manager/agent/internal/sshproof"
 )
+
+type synchronizedLog struct { mu sync.Mutex; data bytes.Buffer }
+func(l *synchronizedLog)Write(data []byte)(int,error){
+ l.mu.Lock();defer l.mu.Unlock();return l.data.Write(data)
+}
+func(l *synchronizedLog)String()string{
+ l.mu.Lock();defer l.mu.Unlock();return l.data.String()
+}
 
 // TestLocalSSHDIntegration uses only ephemeral loopback OpenSSH resources on
 // an isolated CI runner. It never touches production sshd_config or real VPSs.
@@ -76,7 +87,7 @@ func TestLocalSSHDIntegration(t *testing.T){
   t.Fatalf("isolated sshd config invalid: %v %s",err,out)
  }
  server:=exec.Command("/usr/sbin/sshd","-D","-e","-f",conf)
- var serverLog bytes.Buffer
+ var serverLog synchronizedLog
  server.Stderr=&serverLog
  if err:=server.Start();err!=nil{t.Fatal(err)}
  t.Cleanup(func(){if server.Process!=nil{_ = server.Process.Kill();_ = server.Wait()}})
@@ -103,7 +114,7 @@ func TestLocalSSHDIntegration(t *testing.T){
    "-o","KbdInteractiveAuthentication=no","-o","NumberOfPasswordPrompts=0",
    "-o","ControlMaster=no","-o","ControlPath=none","-o","ConnectTimeout=2",
    "-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+knownHosts,
-   "-i",keyfile,username+"@127.0.0.1","printf ssh-login-ok"}
+   "-i",keyfile,username+"@127.0.0.1","printf 'ssh-login-ok\nSSH_CONNECTION=%s\n' \"$SSH_CONNECTION\""}
   b,e:=exec.Command("ssh",args...).CombinedOutput()
   return string(b),e
  }
@@ -114,6 +125,31 @@ func TestLocalSSHDIntegration(t *testing.T){
  output,err:=sshAttempt(clientKey)
  if err!=nil{t.Fatalf("new SSH public-key login failed: %v %s | sshd: %s",err,output,serverLog.String())}
  if !strings.Contains(output,"ssh-login-ok"){t.Fatalf("SSH command was not executed: %s",output)}
+ // Assert the accepted ED25519 fingerprint AND the real session's ephemeral
+ // client port agree. stderr is a test-only log source, not journald proof.
+ var connection []string
+ for _,line:=range strings.Split(output,"\n"){
+  if strings.HasPrefix(line,"SSH_CONNECTION="){connection=strings.Fields(strings.TrimPrefix(line,"SSH_CONNECTION="));break}
+ }
+ if len(connection)!=4{t.Fatalf("no SSH_CONNECTION from new SSH session: %q",output)}
+ clientPort,err:=strconv.Atoi(connection[1]);if err!=nil||clientPort<=0||clientPort>65535{t.Fatalf("bad new SSH port: %q",output)}
+ if connection[0]!="127.0.0.1"||connection[2]!="127.0.0.1"||connection[3]!=strconv.Itoa(port){
+  t.Fatalf("new SSH connection not tied to isolated server: %q",output)
+ }
+ // The event's timestamp is synthetic because -e emits plain test stderr;
+ // production must use trusted journald __REALTIME_TIMESTAMP metadata.
+ started:=time.Now().Add(-10*time.Second)
+ var seen bool
+ for _,line:=range strings.Split(serverLog.String(),"\n"){
+  event,parseErr:=sshproof.ParseMessage(strings.TrimSpace(line))
+  if parseErr!=nil{continue}
+  event.Timestamp=time.Now()
+  candidate:=sshproof.Challenge{LoginUser:username,KeyFingerprint:result.Fingerprint,ClientIP:connection[0],
+   ClientPort:uint16(clientPort),IssuedAt:started,ExpiresAt:started.Add(5*time.Minute)}
+  if err=sshproof.Match(event,candidate);err==nil{seen=true;break}
+ }
+ if !seen{t.Fatalf("no matching sshd accepted-publickey event tied to this SSH session; log: %s",serverLog.String())}
+
  if _,err:=sshAttempt(wrongKey);err==nil{t.Fatal("wrong private key unexpectedly authenticated")}
  effective,err:=exec.Command("/usr/sbin/sshd","-T","-f",conf,"-C",
   fmt.Sprintf("user=%s,host=127.0.0.1,addr=127.0.0.1,laddr=127.0.0.1,lport=%d",username,port)).Output()
