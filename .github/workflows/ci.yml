@@ -12,6 +12,7 @@ jobs:
       - run: cd agent && go test -race ./...
       - run: cd agent && go vet ./...
       - run: cd agent && go build ./cmd/ssh-manager-helper
+      - run: cd agent && go build ./cmd/ssh-manager-prove
   control:
     runs-on: ubuntu-latest
     steps:

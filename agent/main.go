@@ -128,6 +128,7 @@ func run(ctx context.Context,path string)error {
    _,err=a.request(heartbeatCtx,"/agent/v1/heartbeat",map[string]string{"agent_version":"0.1.0","os_id":"linux"})
    cancel()
    if err!=nil{log.Printf("heartbeat: %v",err)}
+   a.drainProofOutbox(ctx)
    pollCtx,cancel:=context.WithTimeout(ctx,10*time.Second)
    raw,err:=a.request(pollCtx,"/agent/v1/poll",map[string]string{})
    cancel()
