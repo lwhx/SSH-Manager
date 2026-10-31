@@ -117,10 +117,10 @@ func TestTamperedSignatureNeverRuns(t *testing.T){
 }
 func TestRootJournalPersists(t *testing.T){
  journal:=&Journal{Directory:filepath.Join(t.TempDir(),"journal")}
- if err:=journal.Claim(testOp);err!=nil{t.Fatal(err)}
- if err:=(&Journal{Directory:journal.Directory}).Claim(testOp);err==nil{t.Fatal("replay across journal processes")}
+ if err:=journal.Claim(testOp,testNode,"ssh.policy.inspect");err!=nil{t.Fatal(err)}
+ if err:=(&Journal{Directory:journal.Directory}).Claim(testOp,testNode,"ssh.policy.inspect");err==nil{t.Fatal("replay across journal processes")}
  if _,err:=os.Stat(filepath.Join(journal.Directory,testOp+".json"));err!=nil{t.Fatal(err)}
- if err:=journal.Claim("../../root");err==nil{t.Fatal("path traversal accepted")}
+ if err:=journal.Claim("../../root",testNode,"ssh.policy.inspect");err==nil{t.Fatal("path traversal accepted")}
 }
 func TestPolicyConfigurationChecks(t *testing.T){
  _,pub:=makeSigner(t)
@@ -187,4 +187,44 @@ func TestRejectsMismatchedSignedPreparation(t *testing.T){
  }
  result:=h.Execute(context.Background(),signed(t,signer,c))
  if result.OK{t.Fatal("accepted root challenge for the wrong Linux user")}
+}
+
+
+func TestRootHelperDurablyFinalizesBeforeReturningAndNeverReexecutes(t *testing.T){
+ private,pub:=makeSigner(t)
+ h,calls:=newHandler(t,pub)
+ c:=validCommand(t)
+ c.Action="ssh.policy.inspect"
+ c.ExpectedRevision="unverified"
+ original:=h.Execute(context.Background(),signed(t,private,c))
+ if !original.OK||original.Code!="POLICY_INSPECTED"{t.Fatalf("inspect not completed: %+v",original)}
+ recovered,err:=(&Journal{Directory:h.Journal.Directory}).Recover(c.ID,testNode,c.Action)
+ if err!=nil||recovered.State!="RECORDED"||!recovered.Result.OK||
+  recovered.Result.Code!=original.Code{
+  t.Fatalf("root crash recovery did not find durable result: %+v %v",recovered,err)
+ }
+ if *calls!=0{t.Fatal("recovery must not install an SSH key")}
+ if again:=h.Execute(context.Background(),signed(t,private,c));again.OK{
+  t.Fatal("replayed signed Root operation executed after durable completion")
+ }
+ wrongNode,err:=h.Journal.Recover(c.ID,"40000000-0000-4000-8000-000000000001",c.Action)
+ if err==nil||wrongNode.State=="RECORDED"{t.Fatal("wrong node recovered Root result")}
+ wrongAction,err:=h.Journal.Recover(c.ID,testNode,"ssh.daily.install")
+ if err==nil||wrongAction.State=="RECORDED"{t.Fatal("wrong SSH action recovered root result")}
+}
+func TestRootJournalReservedWithoutOutcomeRequiresManualReview(t *testing.T){
+ j:=&Journal{Directory:filepath.Join(t.TempDir(),"journal")}
+ if err:=j.Claim(testOp,testNode,"ssh.daily.install");err!=nil{t.Fatal(err)}
+ recovery,err:=j.Recover(testOp,testNode,"ssh.daily.install")
+ if err!=nil||recovery.State!="UNCONFIRMED"||recovery.Result.OK{
+  t.Fatalf("unsafe optimistic recovery of unfinished SSH key install: %+v %v",recovery,err)
+ }
+ if err:=j.Finalize(testOp,testNode,"ssh.daily.install",Result{
+  OK:true,Code:"DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",
+ });err!=nil{t.Fatal(err)}
+ recovery,err=j.Recover(testOp,testNode,"ssh.daily.install")
+ if err!=nil||recovery.State!="RECORDED"||!recovery.Result.OK{t.Fatal("root outcome not durable")}
+ if err:=j.Finalize(testOp,testNode,"ssh.daily.install",Result{
+  OK:false,Code:"KEY_INSTALL_FAILED",
+ });err==nil{t.Fatal("Root result replaced after finalization")}
 }
