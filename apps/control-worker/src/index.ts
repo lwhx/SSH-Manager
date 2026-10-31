@@ -243,7 +243,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
       const nonceHash=await sha256hex(token),id=crypto.randomUUID(),expires=t+VERIFICATION_TTL_SECONDS;
       await env.DB.prepare(
         "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,config_revision,nonce_hash,status,"+
-        "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?,?)"
+        "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)"
       ).bind(id,node.id,key.fingerprint,node.login_user,node.config_revision,nonceHash,t,expires,key.id,a.id).run();
       await audit(env,a,node.id,"ssh.verification.start","PENDING",null,id);
       // No endpoint currently trusts a browser-issued 'verified' claim.
