@@ -138,3 +138,7 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 ### P3.3 Staging 只读兼容性预检
 
 在独立隔离 VPS 上可运行 `sudo python3 scripts/staging_proof_preflight.py --staging-only`。不会修改 SSH 配置，输出受限目录权限、OpenSSH 策略、真实 journald 来源等 PASS/WARN/FAIL，**永不自行产生 VERIFIED**。进一步硬化：拒绝 journald stdout/stderr 的父进程 PID 归属，避免将另一 SSH 会话的成功认证误判为当前会话。
+
+## P3.3 Agent 配对权限与事务一致性加固
+
+已补齐 Agent 配对配置中固定的 Root Helper Socket、systemd StateDirectory，并限制服务账户私钥文件权限；旧配对配置可安全兼容缺失字段。Cloudflare Root 签名验证后的 VERIFIED、node stage、日常密钥时间及人工审计统一提交为一个 D1 事务。详细见 [隔离 Staging 验收清单](docs/P3_STAGING_DEPLOY_CHECKLIST.md)。此阶段不部署生产服务器，也不开放 P4。
