@@ -157,6 +157,10 @@ func (a *Agent)drainOperationReports(ctx context.Context){
      log.Printf("cannot safely archive terminally rejected report %s: %v",id,err)
      return
     }
+    if err=a.markOperationSettled(id);err!=nil{
+     log.Printf("cannot persist settled terminal report marker %s: %v",id,err)
+     return
+    }
     log.Printf("terminal operation report %s archived for operator review (%s)",id,reason)
     processed++
     continue
@@ -164,6 +168,13 @@ func (a *Agent)drainOperationReports(ctx context.Context){
    // The already-executed command is NEVER replayed just to resubmit
    // its receipt; a network error or unknown status keeps the report.
    log.Printf("operation report %s pending for retry: %v",id,sendErr)
+   return
+  }
+  // The durable receipt settlement prevents a recovery loop from
+  // rediscovering this already accepted Root outcome on every restart.
+  // Write the marker BEFORE removing the pending HTTP report.
+  if err=a.markOperationSettled(id);err!=nil{
+   log.Printf("operation result %s accepted but settlement not durable: %v",id,err)
    return
   }
   if err=os.Remove(path);err!=nil{
