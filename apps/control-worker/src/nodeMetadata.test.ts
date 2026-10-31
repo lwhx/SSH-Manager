@@ -30,7 +30,7 @@ describe("audited node settings validation",()=>{
   expect(statement.sql).toContain("revoked_at IS NULL");
   expect(statement.args.slice(0,6)).toEqual(["New name","prod","","new.example.com",22,"root"]);
   expect(statement.args[7]).toBe("unpaired");
-  expect(statement.sql.match(/\\?/g)?.length).toBe(statement.args.length);
+  expect(statement.sql.split("?").length-1).toBe(statement.args.length);
  });
  it("allows metadata-only paired edits but rejects stale paired-state changes",()=>{
   const changed=parseNodeChanges({name:"Renamed",notes:"updated"},n);
