@@ -64,3 +64,17 @@ func TestPublicKeyValidation(t *testing.T){
   if _,_,err:=NormalizeED25519(bad);err==nil{t.Fatalf("bad key accepted %q",bad)}
  }
 }
+
+func TestRejectsSymlinkInHomeAncestry(t *testing.T){
+ base:=t.TempDir()
+ realHome:=filepath.Join(base,"actual","user")
+ if err:=os.MkdirAll(realHome,0700);err!=nil{t.Fatal(err)}
+ homeLink:=filepath.Join(base,"alias")
+ if err:=os.Symlink(filepath.Join(base,"actual"),homeLink);err!=nil{t.Fatal(err)}
+ aliasHome:=filepath.Join(homeLink,"user")
+ _,err:=InstallDaily(aliasHome,os.Getuid(),os.Getgid(),key(t),filepath.Join(t.TempDir(),"snapshots"))
+ if err==nil{t.Fatal("symlink ancestor accepted")}
+ if _,err:=os.Stat(filepath.Join(realHome,".ssh","authorized_keys"));!os.IsNotExist(err){
+  t.Fatal("symlink ancestor redirected privileged write")
+ }
+}

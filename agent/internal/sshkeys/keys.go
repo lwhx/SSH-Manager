@@ -53,6 +53,24 @@ func checkedDir(fd int, uid int)error{
  return nil
 }
 
+// openHome verifies every component from the root directory with O_NOFOLLOW.
+// Merely using O_NOFOLLOW on the final home segment would still allow a
+// symlink in an ancestor to redirect privileged key writes.
+func openHome(home string,uid int)(int,error){
+ fd,err:=syscall.Open("/",syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
+ if err!=nil{return -1,err}
+ if err=checkedDir(fd,uid);err!=nil{syscall.Close(fd);return -1,err}
+ for _,name:=range strings.Split(strings.TrimPrefix(home,"/"),"/"){
+  if name==""||name=="."||name==".."{syscall.Close(fd);return -1,errors.New("unsafe home component")}
+  next,err:=syscall.Openat(fd,name,syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
+  syscall.Close(fd)
+  if err!=nil{return -1,fmt.Errorf("open home component: %w",err)}
+  if err=checkedDir(next,uid);err!=nil{syscall.Close(next);return -1,fmt.Errorf("unsafe home component: %w",err)}
+  fd=next
+ }
+ return fd,nil
+}
+
 func maybeChown(fd,uid,gid int)error{
  var st syscall.Stat_t
  if err:=syscall.Fstat(fd,&st);err!=nil{return err}
@@ -72,7 +90,7 @@ func InstallDaily(home string,uid,gid int,publicKey,snapshotDir string)(Result,e
  result.Fingerprint=fingerprint
  if !filepath.IsAbs(home)||filepath.Clean(home)!=home||home=="/"{return result,errors.New("unsafe home path")}
  if !filepath.IsAbs(snapshotDir){return result,errors.New("snapshot directory must be absolute")}
- homeFD,err:=syscall.Open(home,syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
+ homeFD,err:=openHome(home,uid)
  if err!=nil{return result,fmt.Errorf("open home: %w",err)}
  defer syscall.Close(homeFD)
  if err=checkedDir(homeFD,uid);err!=nil{return result,fmt.Errorf("home validation: %w",err)}
