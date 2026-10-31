@@ -21,11 +21,15 @@ type response struct{
  OK bool `json:"ok"`
  Code string `json:"code"`
 }
-func run(verificationID,nonce string)error{
+func run(verificationID,nonce string)error{return runAtSocket(socket,verificationID,nonce)}
+
+// runAtSocket exists solely to exercise the real Unix proof protocol in tests.
+// Production always selects the fixed root-owned socket above.
+func runAtSocket(socketPath,verificationID,nonce string)error{
  if !uuid.MatchString(verificationID)||len(nonce)!=43{
   return errors.New("invalid verification challenge")
  }
- conn,err:=net.DialTimeout("unix",socket,3*time.Second)
+ conn,err:=net.DialTimeout("unix",socketPath,3*time.Second)
  if err!=nil{return errors.New("local SSH proof socket unavailable")}
  defer conn.Close()
  _=conn.SetDeadline(time.Now().Add(12*time.Second))
