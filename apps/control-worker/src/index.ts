@@ -1,5 +1,6 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges} from "./nodeMetadata";
+import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL} from "./operationStatus";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
@@ -129,8 +130,10 @@ async function queueNodeOperation(
   if(exists)return response({operation_id:exists.id,status:exists.status});
   ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
   await env.DB.prepare("UPDATE operations SET status='EXPIRED' WHERE node_id=? AND status='CREATED' AND expires_at<=?").bind(node.id,now()).run();
-  const pending=await env.DB.prepare("SELECT id FROM operations WHERE node_id=? AND status IN ('CREATED','DISPATCHED','RUNNING') AND expires_at>? LIMIT 1").bind(node.id,now()).first();
-  ensure(!pending,"NODE_OPERATION_IN_PROGRESS",409);
+  const tick=now();
+  const pending=await env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,tick).first<{status:string;expires_at:number}>();
+  const blocker=pending?blockingNodeOperationCode(pending,tick):null;
+  ensure(!blocker,blocker||"NODE_OPERATION_IN_PROGRESS",409);
   const id=crypto.randomUUID(),t=now();
   const cmd={v:1 as const,id,node_id:node.id,action,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload};
   const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
@@ -305,10 +308,9 @@ async function handle(req:Request,env:Env):Promise<Response>{
       const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
       const nonceHash=await sha256hex(token),id=crypto.randomUUID(),expires=t+VERIFICATION_TTL_SECONDS;
       ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
-      const pendingOp=await env.DB.prepare(
-        "SELECT id FROM operations WHERE node_id=? AND status IN ('CREATED','DISPATCHED','RUNNING') AND expires_at>? LIMIT 1"
-      ).bind(node.id,t).first();
-      ensure(!pendingOp,"NODE_OPERATION_IN_PROGRESS",409);
+      const pendingOp=await env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,t).first<{status:string;expires_at:number}>();
+      const blocking=pendingOp?blockingNodeOperationCode(pendingOp,t):null;
+      ensure(!blocking,blocking||"NODE_OPERATION_IN_PROGRESS",409);
       const operationId=crypto.randomUUID();
       const cmd={
         v:1 as const,id:operationId,node_id:node.id,action:"ssh.verification.prepare" as const,
@@ -504,17 +506,19 @@ async function handle(req:Request,env:Env):Promise<Response>{
     const q=nodeId?
       await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations WHERE node_id=? ORDER BY created_at DESC LIMIT 100").bind(nodeId).all():
       await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations ORDER BY created_at DESC LIMIT 100").all();
+    const at=now();
     return response({operations:q.results.map((op:any)=>({
-      ...op,status:op.status==="DISPATCHED"&&op.expires_at<=now()?"RESULT_UNKNOWN":
-      op.status==="CREATED"&&op.expires_at<=now()?"EXPIRED":op.status
+      ...op,status:projectOperationStatus(op,at)
     }))});
   }
   const opMatch=/^\/api\/v1\/operations\/([a-f0-9-]{36})$/.exec(p);
   if(opMatch&&req.method==="GET"){
     const op=await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations WHERE id=?").bind(opMatch[1]).first<any>();
-    if(op?.status==="CREATED"&&op.expires_at<=now()){await env.DB.prepare("UPDATE operations SET status=\'EXPIRED\' WHERE id=? AND status=\'CREATED\'").bind(op.id).run();op.status="EXPIRED";}
-    if(op?.status==="DISPATCHED"&&op.expires_at<=now())op.status="RESULT_UNKNOWN";
-    ensure(op,"OPERATION_NOT_FOUND",404);return response({operation:op});
+    ensure(op,"OPERATION_NOT_FOUND",404);
+    const effectiveStatus=projectOperationStatus(op,now());
+    if(op.status==="CREATED"&&effectiveStatus==="EXPIRED")
+      await env.DB.prepare("UPDATE operations SET status='EXPIRED' WHERE id=? AND status='CREATED'").bind(op.id).run();
+    return response({operation:{...op,status:effectiveStatus}});
   }
   if(p==="/api/v1/audit"&&req.method==="GET"){
     needRole(a,"owner");
