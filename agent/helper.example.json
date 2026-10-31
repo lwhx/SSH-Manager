@@ -7,5 +7,9 @@
   "ssh_port": 22,
   "snapshot_root": "/var/lib/ssh-manager-root/snapshots/REPLACE_NODE",
   "enable_daily_install": false,
-  "enable_ssh_proof": false
+  "enable_ssh_proof": false,
+  "enable_password_disable": false,
+  "enable_password_restore": false,
+  "enable_config_rollback": false,
+  "enable_rescue": false
 }

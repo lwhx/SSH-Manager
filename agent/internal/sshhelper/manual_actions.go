@@ -67,7 +67,7 @@ func (h *Handler) executeManualSSH(ctx context.Context,cmd Command,effective ssh
    return fail("FRESH_VERIFIED_LOGIN_REQUIRED",nil)
   }
   value,err:=h.Managed.Disable(ctx,h.Config.NodeID,h.Config.AllowedUser,effective)
-  if err!=nil{return fail("PASSWORD_DISABLE_MANUAL_REVIEW",err)}
+  if err!=nil{return fail("PASSWORD_DISABLE_MANUAL_REVIEW",nil)}
   return Result{OK:true,Code:"PASSWORD_DISABLED",Detail:value}
  }
  if cmd.Action=="ssh.password.restore"||cmd.Action=="ssh.config.rollback"{
@@ -76,7 +76,7 @@ func (h *Handler) executeManualSSH(ctx context.Context,cmd Command,effective ssh
    return fail("MANUAL_RESTORE_LOCAL_LOCKED",nil)
   }
   value,err:=h.Managed.Restore(ctx,h.Config.NodeID,h.Config.AllowedUser,payload.SnapshotRef,effective)
-  if err!=nil{return fail("SSH_CONFIG_RESTORE_MANUAL_REVIEW",err)}
+  if err!=nil{return fail("SSH_CONFIG_RESTORE_MANUAL_REVIEW",nil)}
   code:="PASSWORD_POLICY_RESTORED"
   if cmd.Action=="ssh.config.rollback"{code="SSH_CONFIG_ROLLED_BACK"}
   return Result{OK:true,Code:code,Detail:value}
@@ -93,7 +93,12 @@ func (h *Handler) executeManualSSH(ctx context.Context,cmd Command,effective ssh
  }else{
   value,err=h.RescueRevoke(a.HomeDir,uid,gid,normalized,h.Config.SnapshotRoot)
  }
- if err!=nil{return fail("RESCUE_KEY_MANUAL_REVIEW",err)}
+ if err!=nil{return fail("RESCUE_KEY_MANUAL_REVIEW",nil)}
+ // A key already in authorized_keys without the exact manager-owned marker
+ // is not safe to revoke later; never assert that we installed it.
+ if cmd.Action=="ssh.rescue.enable"&&value.AlreadyPresent{
+  return fail("RESCUE_ALREADY_PRESENT_UNMANAGED",nil)
+ }
  if !value.FileChecked||value.Fingerprint!=fp{return fail("RESCUE_KEY_OUTCOME_INVALID",nil)}
  if cmd.Action=="ssh.rescue.enable"{
   return Result{OK:true,Code:"RESCUE_KEY_INSTALLED",Detail:value}

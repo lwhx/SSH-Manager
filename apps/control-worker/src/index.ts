@@ -159,7 +159,8 @@ async function dispatchPreparedOperation(env:Env,nodeId:string,operationId:strin
 async function handle(req:Request,env:Env):Promise<Response>{
   const url=new URL(req.url);
   const p=url.pathname;
-  if(p==="/api/v1/health")return response({status:"ok",version:"0.1.0",ssh_writes_enabled:false});
+  if(p==="/api/v1/health")return response({status:"ok",version:"0.1.0",
+    ssh_writes_enabled:env.MANUAL_SSH_ACTIONS_ENABLED==="true"});
   if(p==="/api/v1/identity/link-claim"&&req.method==="POST"){
     safeRequest(req);return claimIdentity(req,env);
   }

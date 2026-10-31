@@ -165,7 +165,7 @@ function App(){
   <button disabled={busy||!proofPublicInput.trim()||!proofFingerprintInput.trim()} onClick={()=>void pinRootProof(selected)}>确认并固定本 VPS 证明公钥</button>
  </>}
  </div>}
- <hr/><h4>SSH 日常密钥登录验证</h4><p>先安装日常公钥，再为当前节点生成一次性挑战。<strong>挑战不代表验证成功</strong>：服务器侧认证证据链尚未完成。</p>
+ <hr/><h4>SSH 日常密钥登录验证</h4><p>先安装日常公钥，再为当前节点生成一次性挑战。<strong>挑战不代表验证成功</strong>：服务器侧认证证据链已经实现，但尚未完成真实 VPS + Cloudflare Staging 全链路验收。</p>
  <button disabled={busy||selected.status!=="online"||selected.init_stage!=="WAITING_VERIFICATION"||!pinnedRootProof||(verification?.status==="PENDING")}
   onClick={()=>void beginVerification(selected)}>生成单节点验证挑战（5分钟）</button>
  {verification&&<div className="hint">
