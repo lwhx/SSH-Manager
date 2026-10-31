@@ -6,6 +6,7 @@ interface Env {
   DB:D1Database; NODE_SESSIONS:DurableObjectNamespace; ASSETS:Fetcher;
   ACCESS_TEAM_DOMAIN:string; ACCESS_AUD:string; BOOTSTRAP_OWNER_EMAIL:string;
   COMMAND_PRIVATE_KEY:string;
+  AGENT_HOSTNAME:string;
   MANUAL_SSH_ACTIONS_ENABLED?:string;
 }
 interface Actor {id:string; email:string; role:string; subject:string;}
@@ -175,7 +176,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
     return response({token,expires_in:300});
   }
   if(p==="/api/v1/me"&&req.method==="GET")return response({
-    id:a.id,email:a.email,role:a.role,
+    id:a.id,email:a.email,role:a.role,agent_gateway_url:"https://"+env.AGENT_HOSTNAME,
     manual_ssh_actions_enabled:env.MANUAL_SSH_ACTIONS_ENABLED==="true"
   });
   if(p==="/api/v1/nodes"&&req.method==="GET"){
