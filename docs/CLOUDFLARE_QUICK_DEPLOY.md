@@ -65,3 +65,7 @@ Control 匿名请求被 Access 拦截；Agent health 直接返回 JSON；Agent �
 原始 wrangler.single.staging.example.jsonc 只是带占位符的模板，不可直接使用 GitHub 自动部署。后续如接入 GitHub/Cloudflare 自动发布，必须保留同一个 D1、Worker 名、命令签名密钥与 Access 策略，且不能将私钥保存到 GitHub。
 
 当前生产环境没有完成真实 SSHD/journald/Root Helper 端到端安全验收。
+
+## 6. GitHub 自动部署（可选）
+
+单 Worker 版本另有按需启用的 GitHub Actions 工作流，可在首次 Wrangler 引导配置 Cloudflare Secret 后自动部署**一个** Worker。默认关闭，不会修改任何 VPS。详情见 [GitHub 自动部署设置](GITHUB_CLOUDFLARE_SINGLE_DEPLOY.md)。

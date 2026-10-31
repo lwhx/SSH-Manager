@@ -38,7 +38,7 @@ npm run cf:quick
 
 不会自动重新生成密钥、自动开启救援或修改 VPS。
 
-[单 Worker 快捷部署](docs/CLOUDFLARE_QUICK_DEPLOY.md) · [完整部署须知](docs/DEPLOYMENT.md) · [双 Worker 迁移指南](docs/MIGRATE_DUAL_TO_SINGLE.md)
+[单 Worker 快捷部署](docs/CLOUDFLARE_QUICK_DEPLOY.md) · [完整部署须知](docs/DEPLOYMENT.md) · [双 Worker 迁移指南](docs/MIGRATE_DUAL_TO_SINGLE.md) · [GitHub 自动部署（单 Worker）](docs/GITHUB_CLOUDFLARE_SINGLE_DEPLOY.md)
 
 ## 核心安全约束
 
