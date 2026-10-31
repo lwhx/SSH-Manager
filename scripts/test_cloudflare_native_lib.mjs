@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {
- extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse
+ extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse,
+ newCloudflareBootstrap,classifyWorkerForBootstrap
 } from "./cloudflare_native_lib.mjs";
 
 const template=JSON.parse(readFileSync(new URL("../wrangler.single.staging.example.jsonc",import.meta.url),"utf8"));
@@ -83,4 +84,34 @@ test("rejects incomplete API responses",()=>{
  assert.deepEqual(requireCloudflareSettingsResponse({
   success:true,result:{bindings:bindings()}
  }).bindings,bindings());
+});
+
+test("four-field Cloudflare-only first-run derives two safe staging hostnames",()=>{
+ const params=newCloudflareBootstrap({
+  SSH_MANAGER_BASE_DOMAIN:"whks.de",
+  SSH_MANAGER_ACCESS_TEAM_DOMAIN:"team.cloudflareaccess.com",
+  SSH_MANAGER_ACCESS_AUD:"1234567890-staging-access-application-aud",
+  SSH_MANAGER_OWNER_EMAIL:"admin@example.net"
+ });
+ assert.equal(params.controlHost,"ssh-staging.whks.de");
+ assert.equal(params.agentHost,"agent-staging.whks.de");
+ assert.equal(params.team,"team.cloudflareaccess.com");
+ assert.equal(params.owner,"admin@example.net");
+ assert.throws(()=>newCloudflareBootstrap({
+  SSH_MANAGER_BASE_DOMAIN:"whks.de",
+  SSH_MANAGER_ACCESS_TEAM_DOMAIN:"team.cloudflareaccess.com",
+  SSH_MANAGER_ACCESS_AUD:"1234567890-staging-access-application-aud",
+  SSH_MANAGER_OWNER_EMAIL:"admin@example.net",
+  SSH_MANAGER_CONTROL_HOSTNAME:"ssh.whks.de"
+ }));
+});
+test("bootstrap only with empty Worker and no existing Staging D1",()=>{
+ assert.equal(classifyWorkerForBootstrap(null,[]),"new");
+ assert.equal(classifyWorkerForBootstrap({bindings:[]},[]),"new");
+ assert.equal(classifyWorkerForBootstrap({bindings:[{name:"ASSETS",type:"assets"}]},[]),"new");
+ assert.equal(classifyWorkerForBootstrap({bindings:bindings()},list),"existing");
+ assert.throws(()=>classifyWorkerForBootstrap(null,list));
+ assert.throws(()=>classifyWorkerForBootstrap({bindings:[]},list));
+ assert.throws(()=>classifyWorkerForBootstrap({bindings:[{name:"COMMAND_PRIVATE_KEY",type:"secret_text"}]},[]));
+ assert.throws(()=>classifyWorkerForBootstrap({bindings:[{name:"DB",type:"d1",database_id:UUID}]},[]));
 });
