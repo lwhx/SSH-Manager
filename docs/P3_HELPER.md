@@ -38,7 +38,7 @@
 - 未签名或签名篡改的指令；非本机节点；过期命令；重复命令。
 - 错误的 Linux 用户、错误公钥指纹、错误配置版本。
 - sshd 语法无效、有效配置不支持公钥认证。
-- 非默认 AuthorizedKeysFile、额外认证条件、不允许的 root SSH 策略。
+- 不含预期 authorized_keys 路径的非常规 AuthorizedKeysFile、额外认证条件、不允许的 root SSH 策略。
 - 用户家目录路径含不安全目录或符号链接；authorized_keys 所有权或权限不安全。
 - Helper 未安装、配置异常、执行时不是 root、Unix peer UID 不匹配。
 

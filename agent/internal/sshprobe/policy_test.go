@@ -28,3 +28,10 @@ func TestRejectDuplicateAndMissing(t *testing.T){
  if _,err:=ParseEffective(normal+"pubkeyauthentication no\n");err==nil{t.Fatal("duplicate accepted")}
  if _,err:=ParseEffective(strings.Replace(normal,"authenticationmethods any\n","",1));err==nil{t.Fatal("missing accepted")}
 }
+
+func TestAcceptsTwoStandardOpenSSHKeyLocations(t *testing.T){
+ output:=strings.Replace(normal,"authorizedkeysfile .ssh/authorized_keys","authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2",1)
+ p,err:=ParseEffective(output)
+ if err!=nil{t.Fatal(err)}
+ if err:=p.DailyKeyEligibility("root");err!=nil{t.Fatalf("standard authorized_keys2 fallback rejected: %v",err)}
+}

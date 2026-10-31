@@ -61,7 +61,9 @@ func (p Effective) DailyKeyEligibility(loginUser string)error{
  if p.AuthenticationMethods!="any"&&p.AuthenticationMethods!="publickey"{
   return fmt.Errorf("additional authentication methods required: %s",p.AuthenticationMethods)
  }
- if len(p.AuthorizedKeysFile)!=1||p.AuthorizedKeysFile[0]!=".ssh/authorized_keys"{
+ if len(p.AuthorizedKeysFile)<1||len(p.AuthorizedKeysFile)>2||
+  p.AuthorizedKeysFile[0]!=".ssh/authorized_keys"||
+  (len(p.AuthorizedKeysFile)==2&&p.AuthorizedKeysFile[1]!=".ssh/authorized_keys2"){
   return fmt.Errorf("unsupported AuthorizedKeysFile: %v",p.AuthorizedKeysFile)
  }
  switch p.PermitRootLogin{

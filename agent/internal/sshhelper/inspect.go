@@ -42,7 +42,9 @@ func InspectEffective(parent context.Context,c Config)(sshprobe.Effective,error)
  if err!=nil{return zero,fmt.Errorf("sshd effective config check failed: %w",err)}
  policy,err:=sshprobe.ParseEffective(string(stdout))
  if err!=nil{return zero,err}
- if len(policy.AuthorizedKeysFile)!=1||strings.TrimSpace(policy.AuthorizedKeysFile[0])!=".ssh/authorized_keys"{
+ if len(policy.AuthorizedKeysFile)<1||len(policy.AuthorizedKeysFile)>2||
+  strings.TrimSpace(policy.AuthorizedKeysFile[0])!=".ssh/authorized_keys"||
+  (len(policy.AuthorizedKeysFile)==2&&policy.AuthorizedKeysFile[1]!=".ssh/authorized_keys2"){
   return zero,errors.New("unsupported effective AuthorizedKeysFile")
  }
  return policy,nil
