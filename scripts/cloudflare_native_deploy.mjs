@@ -57,11 +57,24 @@ function accountId(){
  catch{throw Error("Cannot discover Cloudflare account. Set CLOUDFLARE_ACCOUNT_ID as a build variable.");}
  return extractWhoamiAccount(json);
 }
-async function settings(id){
- const token=process.env.CLOUDFLARE_API_TOKEN;
- if(!token)throw Error(
-  "CLOUDFLARE_API_TOKEN missing from Cloudflare Builds. Select a scoped Build API token "+
+function authToken(){
+ if(process.env.CLOUDFLARE_API_TOKEN)return process.env.CLOUDFLARE_API_TOKEN;
+ // Reuse Wrangler's existing Cloudflare Builds credentials. The output is
+ // captured in process memory only and NEVER printed or written to disk.
+ let data;
+ try{data=JSON.parse(wrangler(["auth","token","--json"],{capture:true}));}
+ catch{throw Error(
+  "Cannot access Cloudflare Builds credentials. Select a scoped Build API token "+
   "with Workers Scripts Read/Edit, Workers Routes Edit and D1 Read/Edit permissions.");
+ }
+ if((data.type!=="api_token"&&data.type!=="oauth")||
+  typeof data.token!=="string"||data.token.length<16){
+  throw Error("Wrangler did not provide usable API token authentication");
+ }
+ return data.token;
+}
+async function settings(id){
+ const token=authToken();
  const response=await fetch(
   "https://api.cloudflare.com/client/v4/accounts/"+id+"/workers/scripts/"+NAME+"/settings",
   {headers:{Authorization:"Bearer "+token,Accept:"application/json"},
@@ -147,6 +160,7 @@ async function main(){
  if(process.argv.length!==2)throw Error("Use npm run cf:deploy without arguments");
  const branch=process.env.WORKERS_CI_BRANCH||process.env.GITHUB_REF_NAME;
  if(branch&&branch!=="main")throw Error("Only main may deploy Staging; previews are disabled");
+ if(existsSync(CONFIG))throw Error("An existing temporary Staging config was found; refusing overwrite");
  if(Number(process.versions.node.split(".")[0])<22)throw Error("Node.js 22+ required");
  // Fail fast before creating any Cloudflare resource if React build fails.
  buildAssets();
