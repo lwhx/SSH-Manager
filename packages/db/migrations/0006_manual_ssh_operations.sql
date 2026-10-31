@@ -8,3 +8,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_rescue_per_node
  ON node_keys(node_id) WHERE purpose='rescue' AND state='installed';
 CREATE INDEX IF NOT EXISTS idx_snapshot_active
  ON ssh_config_snapshots(node_id,restored_at,created_at);
+
+-- A failed guard within D1 batch must ABORT, rolling back any preceding
+-- operation-status update rather than returning a false-success 409 after commit.
+CREATE TABLE IF NOT EXISTS manual_ssh_assertions (
+ value INTEGER NOT NULL CHECK(value=1)
+);

@@ -378,6 +378,10 @@ async function handle(req:Request,env:Env):Promise<Response>{
         reason.length>=12&&reason.length<=280&&!/[\\x00-\\x1f\\x7f]/.test(reason),
         "MANUAL_NODE_CONFIRMATION_REQUIRED",403);
       const action=manualActions[sub];
+      const proofKey=await env.DB.prepare(
+        "SELECT node_id FROM node_ssh_proof_keys WHERE node_id=?"
+      ).bind(node.id).first();
+      ensure(proofKey,"NODE_ROOT_PROOF_KEY_NOT_PINNED",409);
       ensure(isOnline(node),"NODE_OFFLINE",409);
       ensure(/^[a-f0-9]{64}$/.test(node.config_revision),"POLICY_INSPECTION_REQUIRED",409);
       const payload:Record<string,unknown>={
