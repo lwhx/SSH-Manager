@@ -11,9 +11,12 @@ export function buildStagingInstallerCommand(nodeId:string,gateway:string,sha:st
  // mktemp creates a private (0700) directory: no predictable /tmp path
  // for another local user to swap before a privileged sudo bash call.
  return [
-  "SM_INSTALL_DIR=\"$(mktemp -d)\"",
-  "curl -fsSL --proto '=https' --tlsv1.2 '"+url+"' -o \"$SM_INSTALL_DIR/install.sh\" &&",
-  "sudo bash \"$SM_INSTALL_DIR/install.sh\" --node-id '"+id+"' --gateway '"+origin+"' --revision '"+rev+"'",
-  "rm -rf -- \"$SM_INSTALL_DIR\""
+  "(",
+  "  set -e",
+  "  SM_INSTALL_DIR=\"$(mktemp -d)\"",
+  "  trap 'rm -rf -- \"$SM_INSTALL_DIR\"' EXIT",
+  "  curl -fsSL --proto '=https' --tlsv1.2 '"+url+"' -o \"$SM_INSTALL_DIR/install.sh\"",
+  "  sudo bash \"$SM_INSTALL_DIR/install.sh\" --node-id '"+id+"' --gateway '"+origin+"' --revision '"+rev+"'",
+  ")"
  ].join("\n");
 }
