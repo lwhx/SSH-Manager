@@ -9,6 +9,8 @@ import (
  "net"
  "os"
  "path/filepath"
+ "strings"
+ "syscall"
  "testing"
  "time"
 
@@ -74,4 +76,41 @@ func TestPeerCredentialsDenyOtherUID(t *testing.T){
  var response sshhelper.Result
  if err=json.NewDecoder(conn).Decode(&response);err==nil{t.Fatal("unauthorized socket peer received response")}
  <-done
+}
+
+
+func TestProofSocketUsesKernelPeerCredentialsAndFailClosed(t *testing.T){
+ listener,h,_:=testListener(t)
+ defer listener.Close()
+ observed:=make(chan *syscall.Ucred,1)
+ completed:=make(chan struct{})
+ go func(){
+  conn,err:=listener.AcceptUnix()
+  if err==nil{
+   creds,credErr:=peerCredentials(conn)
+   if credErr!=nil{observed<-nil}else{observed<-creds}
+   handleProof(conn,h)
+  }else{observed<-nil}
+  close(completed)
+ }()
+ client,err:=net.DialUnix("unix",nil,listener.Addr().(*net.UnixAddr))
+ if err!=nil{t.Fatal(err)}
+ defer client.Close()
+ _=client.SetDeadline(time.Now().Add(3*time.Second))
+ request,_:=json.Marshal(sshhelper.ProofRequest{
+  VerificationID:"40000000-0000-4000-8000-000000000001",
+  Nonce:strings.Repeat("A",43),
+ })
+ if _,err=client.Write(request);err!=nil{t.Fatal(err)}
+ if err=client.CloseWrite();err!=nil{t.Fatal(err)}
+ var result sshhelper.ProofResult
+ if err=json.NewDecoder(client).Decode(&result);err!=nil{t.Fatal(err)}
+ if result.OK||result.Code!="PROOF_FEATURE_DISABLED"{
+  t.Fatalf("disabled proof socket must fail closed: %+v",result)
+ }
+ creds:=<-observed
+ if creds==nil||int(creds.Pid)!=os.Getpid()||int(creds.Uid)!=os.Getuid(){
+  t.Fatalf("kernel proof credentials missing or incorrect: %+v",creds)
+ }
+ <-completed
 }
