@@ -32,7 +32,9 @@ type JournalRecovery struct{
 }
 func allowedJournalAction(action string)bool{
  switch action{
- case "ssh.daily.install","ssh.policy.inspect","ssh.verification.prepare":
+ case "ssh.daily.install","ssh.policy.inspect","ssh.verification.prepare",
+  "ssh.password.disable","ssh.password.restore","ssh.config.rollback",
+  "ssh.rescue.enable","ssh.rescue.revoke":
   return true
  default:return false
  }

@@ -37,6 +37,10 @@ type Config struct{
  SnapshotRoot string `json:"snapshot_root"`
  EnableDailyInstall bool `json:"enable_daily_install"`
  EnableSSHProof bool `json:"enable_ssh_proof"`
+ EnablePasswordDisable bool `json:"enable_password_disable"`
+ EnablePasswordRestore bool `json:"enable_password_restore"`
+ EnableConfigRollback bool `json:"enable_config_rollback"`
+ EnableRescue bool `json:"enable_rescue"`
 }
 
 type SignedCommand struct{
@@ -77,6 +81,9 @@ type Handler struct{
  Inspect PolicyReader
  Lookup AccountLookup
  Install KeyInstaller
+ RescueInstall KeyInstaller
+ RescueRevoke KeyInstaller
+ Managed SSHPolicyEditor
  Journal *Journal
  Challenges *ChallengeStore
  ProofSigningKey ed25519.PrivateKey
@@ -91,6 +98,8 @@ func (h *Handler) defaults(){
   if h.Inspect==nil{h.Inspect=InspectEffective}
   if h.Lookup==nil{h.Lookup=user.Lookup}
   if h.Install==nil{h.Install=sshkeys.InstallDaily}
+  if h.RescueInstall==nil{h.RescueInstall=sshkeys.InstallRescue}
+  if h.RescueRevoke==nil{h.RescueRevoke=sshkeys.RevokeRescue}
   if h.Clock==nil{h.Clock=time.Now}
   if h.EUID==nil{h.EUID=os.Geteuid}
   if h.ObserveSSH==nil{h.ObserveSSH=sshproof.ObserveLinuxSSHLogin}
@@ -129,7 +138,9 @@ func (h *Handler) Verify(s SignedCommand)(Command,error){
  if cmd.IssuedAt>epoch+10||cmd.ExpiresAt<=epoch||cmd.ExpiresAt<=cmd.IssuedAt||cmd.ExpiresAt>cmd.IssuedAt+60{
   return cmd,errors.New("stale or excessive TTL")
  }
- if cmd.Action!="ssh.policy.inspect"&&cmd.Action!="ssh.daily.install"&&cmd.Action!="ssh.verification.prepare"{
+ if cmd.Action!="ssh.policy.inspect"&&cmd.Action!="ssh.daily.install"&&cmd.Action!="ssh.verification.prepare"&&
+  cmd.Action!="ssh.password.disable"&&cmd.Action!="ssh.password.restore"&&cmd.Action!="ssh.config.rollback"&&
+  cmd.Action!="ssh.rescue.enable"&&cmd.Action!="ssh.rescue.revoke"{
   return cmd,errors.New("action denied")
  }
  if cmd.ExpectedRevision==""{return cmd,errors.New("missing expected config revision")}
@@ -171,6 +182,10 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)(out Result){
    "authorizedkeysfile":p.AuthorizedKeysFile,
    "verified_login":false,
   }}
+ }
+ if isManualSSHAction(cmd.Action){
+  if cmd.ExpectedRevision=="unverified"||cmd.ExpectedRevision!=p.Revision{return fail("POLICY_REVISION_MISMATCH",nil)}
+  return h.executeManualSSH(ctx,cmd,p)
  }
  if cmd.Action=="ssh.verification.prepare"{
   if cmd.ExpectedRevision!=p.Revision||cmd.ExpectedRevision=="unverified"{

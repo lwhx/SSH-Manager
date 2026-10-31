@@ -1,5 +1,6 @@
 export const ALLOWED_AGENT_ACTIONS = [
-  "node.preflight","node.status","ssh.policy.inspect","ssh.verification.prepare","ssh.daily.install"
+  "node.preflight","node.status","ssh.policy.inspect","ssh.verification.prepare","ssh.daily.install",
+  "ssh.password.disable","ssh.password.restore","ssh.config.rollback","ssh.rescue.enable","ssh.rescue.revoke"
 ] as const;
 export type AgentAction = typeof ALLOWED_AGENT_ACTIONS[number];
 export interface Command {

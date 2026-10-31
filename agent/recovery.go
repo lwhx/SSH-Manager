@@ -29,7 +29,8 @@ type rootRecovery struct{
 }
 func rootRecoveryAction(action string)bool{
  switch action{
- case "ssh.policy.inspect","ssh.daily.install","ssh.verification.prepare":
+ case "ssh.policy.inspect","ssh.daily.install","ssh.verification.prepare",
+  "ssh.password.disable","ssh.password.restore","ssh.config.rollback","ssh.rescue.enable","ssh.rescue.revoke":
   return true
  default:return false
  }

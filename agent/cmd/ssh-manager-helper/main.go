@@ -21,6 +21,8 @@ import (
  "time"
 
  "github.com/lwhx/SSH-Manager/agent/internal/sshhelper"
+ "github.com/lwhx/SSH-Manager/agent/internal/sshmanaged"
+ "github.com/lwhx/SSH-Manager/agent/internal/sshprobe"
  "github.com/lwhx/SSH-Manager/agent/internal/sshproof"
 )
 
@@ -248,6 +250,13 @@ func main(){
   Challenges:&sshhelper.ChallengeStore{Directory:challengePath},
   Outbox:&sshhelper.Outbox{Directory:rootOutboxPath},
   ProofSigningKey:proofSigningKey,
+ }
+ helper.Managed=&sshmanaged.Manager{
+  MainPath:"/etc/ssh/sshd_config",
+  DropinPath:"/etc/ssh/sshd_config.d/00-ssh-manager.conf",
+  SnapshotDir:conf.SnapshotRoot,
+  Inspect:func(ctx context.Context)(sshprobe.Effective,error){return sshhelper.InspectEffective(ctx,conf)},
+  Reload:sshmanaged.ReloadSystemSSH,
  }
  if conf.EnableSSHProof{
   loginUser,err:=user.Lookup(conf.AllowedUser)
