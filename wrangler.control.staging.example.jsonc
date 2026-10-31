@@ -1,0 +1,10 @@
+{
+  "$schema":"node_modules/wrangler/config-schema.json",
+  "name":"ssh-manager-control-staging",
+  "main":"apps/control-worker/src/index.ts",
+  "compatibility_date":"2026-10-01",
+  "assets":{"directory":"./apps/console/dist","binding":"ASSETS","run_worker_first":["/api/*"]},
+  "d1_databases":[{"binding":"DB","database_name":"ssh-manager-staging","database_id":"REPLACE_WITH_STAGING_D1_UUID","migrations_dir":"packages/db/migrations"}],
+  "durable_objects":{"bindings":[{"name":"NODE_SESSIONS","class_name":"NodeSession","script_name":"ssh-manager-agent-gateway-staging"}]},
+  "vars":{"ACCESS_TEAM_DOMAIN":"REPLACE.cloudflareaccess.com","ACCESS_AUD":"REPLACE_STAGING_ACCESS_APPLICATION_AUD","BOOTSTRAP_OWNER_EMAIL":"owner@example.com"}
+}

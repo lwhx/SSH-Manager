@@ -1,0 +1,10 @@
+{
+  "$schema":"node_modules/wrangler/config-schema.json",
+  "name":"ssh-manager-agent-gateway-staging",
+  "main":"apps/agent-gateway/src/index.ts",
+  "compatibility_date":"2026-10-01",
+  "durable_objects":{"bindings":[{"name":"NODE_SESSIONS","class_name":"NodeSession"}]},
+  "migrations":[{"tag":"v1","new_sqlite_classes":["NodeSession"]}],
+  "d1_databases":[{"binding":"DB","database_name":"ssh-manager-staging","database_id":"REPLACE_WITH_STAGING_D1_UUID","migrations_dir":"packages/db/migrations"}],
+  "vars":{"COMMAND_PUBLIC_KEY":"REPLACE_WITH_STAGING_BASE64URL_RAW_ED25519_PUBKEY"}
+}

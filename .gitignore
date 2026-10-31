@@ -8,3 +8,6 @@ coverage/
 .DS_Store
 agent/ssh-manager-agent
 !*.example
+wrangler.control.staging.local.jsonc
+wrangler.gateway.staging.local.jsonc
+.staging-evidence/

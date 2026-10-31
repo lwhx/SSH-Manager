@@ -359,6 +359,15 @@ export default {
   async fetch(req:Request,env:Env):Promise<Response>{
     try{
       const p=path(req);
+      if(p==="/agent/v1/health"&&req.method==="GET"){
+        return response({
+          status:"ok",
+          version:"0.1.0",
+          agent_auth:"device-ed25519",
+          browser_access_required:false,
+          ssh_writes_enabled:false
+        });
+      }
       if(p==="/agent/v1/pair"&&req.method==="POST")return await pair(req,env);
       if(p.startsWith("/agent/v1/")&&["POST","GET"].includes(req.method))return await authenticated(req,env);
       return response({error:"NOT_FOUND"},404);

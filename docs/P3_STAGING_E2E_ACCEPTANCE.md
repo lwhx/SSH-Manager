@@ -80,3 +80,13 @@ python3 -m unittest discover -s scripts -p 'test_staging_readiness.py' -v
 ## 当前状态
 
 此文档仅为**待执行的 Staging 验收程序**，不是已完成的测试证明。真实测试 VPS、真实 Cloudflare Staging 和 Windows 私钥登录目前均未在本轮使用。
+
+
+## 7. 真实联调执行入口
+
+P3.4 现在增加两个仅用于隔离 Staging 的执行入口：
+
+1. scripts/staging_remote_probe.py：从管理员机器匿名检查远端安全拓扑。Control 必须被 Cloudflare Access 拦截，Agent Gateway 必须直接返回设备认证 health JSON，不能被浏览器 Access 误拦截。
+2. docs/P3_STAGING_LIVE_RUNBOOK.md：固定 Cloudflare Staging、单 VPS、Root Helper、Windows 新 SSH 会话和 D1 VERIFIED 的完整执行顺序。
+
+这两个入口只让 T01–T11 可重复执行，不会把任何条目标记为已通过。真实环境没有留存证据前，本文件的当前状态仍是“待验收”。
