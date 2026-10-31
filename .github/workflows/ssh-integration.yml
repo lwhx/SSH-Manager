@@ -1,0 +1,29 @@
+name: Isolated SSH integration
+on:
+  pull_request:
+    paths:
+      - 'agent/**'
+      - '.github/workflows/ssh-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-loopback-sshd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: Install test-only sshd
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+      - name: Verify real loopback public-key login without disabling passwords
+        working-directory: agent
+        env:
+          SSH_MANAGER_REQUIRE_INTEGRATION: '1'
+        run: sudo -E "$(command -v go)" test -tags ssh_integration -run TestLocalSSHDIntegration -v ./internal/sshkeys
