@@ -29,6 +29,7 @@ type Config struct {
  DeviceKey string `json:"device_key"`
  CommandPublicKey string `json:"command_public_key"`
  StateDir string `json:"state_dir"`
+ HelperSocket string `json:"helper_socket"`
 }
 type Command struct {
  V int `json:"v"`
@@ -83,7 +84,7 @@ func (a *Agent) verify(s SignedCommand)(Command,error){
  if err=json.Unmarshal([]byte(s.Command),&c);err!=nil{return c,err}
  now:=time.Now().Unix()
  if c.NodeID!=a.config.NodeID||c.V!=1||!operationID.MatchString(c.ID)||c.IssuedAt>now+10||c.ExpiresAt<=now||c.ExpiresAt>c.IssuedAt+60 {return c,errors.New("invalid or expired command")}
- if c.Action!="node.preflight"&&c.Action!="node.status"&&c.Action!="ssh.daily.install"{return c,errors.New("action not allowed")}
+ if c.Action!="node.preflight"&&c.Action!="node.status"&&c.Action!="ssh.daily.install"&&c.Action!="ssh.policy.inspect"{return c,errors.New("action not allowed")}
  return c,nil
 }
 func report(a *Agent,ctx context.Context,id,status,code string,detail any){
@@ -97,9 +98,17 @@ func (a *Agent) handle(ctx context.Context,s SignedCommand){
   return
  }
  switch c.Action{
- case "ssh.daily.install":
-  // Deliberate safety lock: the independent privileged SSH helper is not ready.
-  report(a,ctx,c.ID,"FAILED","SSH_HELPER_NOT_IMPLEMENTED",map[string]string{"message":"SSH write disabled until privileged helper and login verification are audited"})
+ case "ssh.daily.install","ssh.policy.inspect":
+  result,err:=a.sendToLocalHelper(ctx,s)
+  if err!=nil{
+   report(a,ctx,c.ID,"FAILED","ROOT_HELPER_UNAVAILABLE",map[string]string{"reason":"local root helper not installed or unavailable"})
+   break
+  }
+  if !result.OK{
+   report(a,ctx,c.ID,"FAILED",result.Code,result.Detail)
+   break
+  }
+  report(a,ctx,c.ID,"SUCCEEDED",result.Code,result.Detail)
  case "node.preflight":
   report(a,ctx,c.ID,"SUCCEEDED","READ_ONLY_DIAGNOSTIC",readOnlyPreflight())
  case "node.status":
