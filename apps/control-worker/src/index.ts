@@ -1,6 +1,7 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL} from "./operationStatus";
+import {dispatchPreparedOperation} from "./operationDispatch";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
@@ -146,19 +147,6 @@ async function queueNodeOperation(
   ]);
   await dispatchPreparedOperation(env,node.id,id,signed);
   return response({operation_id:id,status:"QUEUED"},202);
-}
-
-async function dispatchPreparedOperation(env:Env,nodeId:string,operationId:string,signed:{command:string;signature:string}):Promise<void>{
-  // WSS is opportunistic; if no WSS session accepted delivery, HTTPS poll takes over.
-  try{
-    await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(operationId).run();
-    const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(nodeId));
-    const delivered=await stub.fetch("https://node.internal/dispatch",{method:"POST",body:JSON.stringify(signed)});
-    const value=await delivered.json() as {delivered?:number};
-    if(!value.delivered)await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(operationId).run();
-  }catch{
-    await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(operationId).run();
-  }
 }
 
 async function handle(req:Request,env:Env):Promise<Response>{
