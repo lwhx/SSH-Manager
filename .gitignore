@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.dev.vars*
+.env*
+.wrangler/
+coverage/
+*.testbin
+.DS_Store
+agent/ssh-manager-agent
+!*.example

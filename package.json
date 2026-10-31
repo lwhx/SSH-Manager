@@ -1,0 +1,18 @@
+{
+  "name": "ssh-manager",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build:web": "vite build --config apps/console/vite.config.ts",
+    "dev:web": "vite --config apps/console/vite.config.ts",
+    "deploy:gateway": "wrangler deploy --config wrangler.gateway.jsonc",
+    "deploy:control": "wrangler deploy --config wrangler.control.jsonc",
+    "db:migrate:local": "wrangler d1 migrations apply ssh-manager --config wrangler.control.jsonc --local",
+    "db:migrate:remote": "wrangler d1 migrations apply ssh-manager --config wrangler.control.jsonc --remote",
+    "test:agent": "cd agent && go test ./..."
+  },
+  "dependencies": {"jose":"^6.1.0","react":"^19.2.0","react-dom":"^19.2.0"},
+  "devDependencies": {"@cloudflare/workers-types":"^4.20260901.0","@types/react":"^19.2.0","@types/react-dom":"^19.2.0","@vitejs/plugin-react":"^5.0.0","typescript":"^5.9.0","vite":"^7.1.0","wrangler":"^4.45.0"}
+}
