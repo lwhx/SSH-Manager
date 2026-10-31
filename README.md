@@ -46,6 +46,8 @@
 
 节点详情使用 `#/nodes/<UUID>?tab=ssh` 等哈希地址；只包含节点标识及页签，不保存配对令牌或 SSH 私钥。编辑已配对节点时，SSH 主机、端口和登录用户在前后端均锁定；分组、备注和展示名称可编辑并记录审计。首次上线必须由 Staging D1 增量迁移应用 `0007_node_metadata.sql`，官方部署脚本先迁移再部署 Worker。
 
+**管理台改版验收**：[VPS 节点列表、配对向导与任务中心 Staging 验收清单](docs/VPS_CONSOLE_STAGING_ACCEPTANCE.md)。所有真实 VPS 试验仍必须先经过安全关卡。
+
 ## Linux VPS Agent 安装与配对（Staging）
 
 管理端部署成功不等于 VPS 已连接。**进入「VPS 节点」→「添加 VPS」→「基本信息」→「安装 Agent」→「确认连接」**，或从服务器列表打开已有节点的 **「Agent 管理」** 页签，面板会显示 **Agent 安装与配对** 向导：复制绑定了当前 Worker Git commit 的安装命令到 Debian/Ubuntu systemd 测试 VPS；安装器自动构建并启动非 root Agent，完成配对时从交互终端读取十分钟一次性令牌（不出现在命令行/日志）。Token 过期可以在同一节点点击「重新生成配对令牌」，无需删除节点。
