@@ -21,13 +21,26 @@
 6. 在隔离 Staging 环境运行 JWT 伪造/过期、配对令牌重复、Agent 签名重放和 WebSocket 连通性测试。
 7. 真实 VPS 验证之前，不要启用 SSH 写操作。
 
-## 当前尚未完成
+## 当前实现与不可跳过的安全验收
 
-- Agent WSS 主动长连及切换重连完整状态机（目前 HTTPS 轮询可使用）。
-- SSH 特权 Helper、快照、可信会话证明和 Linux 发行版兼容性测试。
-- 前端完整的 Owner 二次确认、RBAC 管理和实时操作流。
-- 密码登录恢复、救援公钥授权与撤销。
-- 端到端 Cloudflare Staging 部署验收与 T01-T36 的实际测试。
+已实现 Agent 出站通信、Root Helper 限权 Unix Socket、指定 VPS 的日常公钥安装、Root 认证签名、Cloudflare 验签、防重放、D1 一次性状态更新、Agent/Root 持久化操作结果及断网恢复。Owner 为每台 VPS 人工固定 Root Helper 的独立证明公钥。
+
+**真实 VPS + Cloudflare Staging 的端到端验收仍未完成。** GitHub CI 和本地 workerd 合约测试不能替代真实 SSHD journald 认证日志与 VPS 系统权限验证。
+
+- P4 关闭密码登录、单节点救援公钥启用/撤销及 SSH 配置手动回滚：尚未开发，继续保持锁定。
+- 可信登录的人工验收参见 [P3.3 证明指南](P3_PROOF_END_TO_END.md)。
+- 隔离 VPS 权限、服务账户及预检参见 [Staging 清单](P3_STAGING_DEPLOY_CHECKLIST.md)。
+- Root/Agent 断网与崩溃恢复参见 [P3.3 可靠性](P3_RELIABILITY.md)。
+
+### 本地 Worker / D1 合约测试（不调用远程服务）
+
+CI 额外运行：
+
+```bash
+node scripts/test_gateway_workerd.mjs --local-only
+```
+
+脚本使用 `wrangler dev --local`、临时 D1 `--persist-to` 状态目录和仅用于进程内测试的 Ed25519 公私钥，验证真实 Worker 设备认证、Root 证明签名、D1 状态转移、幂等与数据库故障注入。只监听 127.0.0.1，不操作云端数据库或 VPS。运行结束自动移除测试配置和临时目录。
 
 ## 紧急恢复
 
@@ -35,8 +48,10 @@
 
 ## Agent 配置文件权限（必检）
 
-`-mode pair` 默认会创建由执行用户拥有、0600 权限的配置文件。若使用 `sudo` 配对，必须在启动非特权 Agent 服务前创建独立的 `ssh-manager` 用户/组，并将 `/etc/ssh-manager` 目录设为 `root:ssh-manager` 0750、`agent.json` 设为 `root:ssh-manager` 0640。Agent 只需读取设备私钥，不能拥有修改配置的能力。
+标准路径 `/etc/ssh-manager/agent.json` 的配对操作应先建立 `ssh-manager` 系统账户并由 root 执行。目录权限为 **`root:ssh-manager 0750`**，设备凭据文件权限必须是 **`ssh-manager:ssh-manager 0600`**。Agent 启动时会拒绝符号链接、组/全局可读权限及其他 UID 拥有的设备私钥。
 
-Agent 使用 systemd `StateDirectory=ssh-manager` 保存本地操作收据；同一指令经 WSS 与 HTTPS 重复送达时只处理一次。操作未确认时不会自动回滚。
+Root Helper 的 `/etc/ssh-manager/helper.json` 保持 **`root:root 0600`**，不可与 Agent 设备私钥混放。Root 独立证明私钥在 `/var/lib/ssh-manager-root` 中，不上传云端。
 
-`agent/internal/sshkeys` 目前仅是**未接入网络/特权 Helper 的受测文件维护模块**；不得单独让 Web 请求触发修改系统 SSH。
+Agent 的 systemd 状态目录为 **`StateDirectory=ssh-manager-agent`**，存储领取凭据、等待云端确认的回执、人工核查标记；Root Helper 使用 **`StateDirectory=ssh-manager-root`** 保存 root-only 执行日志与签名证明。任何操作的执行结果不确定时都禁止自动重执行 SSH 修改，也禁止自动回滚。
+
+旧文档曾出现 `agent.json` 为 `root:ssh-manager 0640` 的建议；该权限与现行 Agent 运行时严格的同 UID、0600 检查不兼容，本版以这里的说明为准。
