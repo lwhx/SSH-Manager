@@ -139,6 +139,9 @@ func(h *Handler)ProveSession(ctx context.Context,peerPID,peerUID int,request Pro
   AuthenticatedAt:event.Timestamp.Unix(),ObservedAt:now.Unix(),
   ClientIP:event.ClientIP,ClientPort:event.ClientPort,SSHDPID:event.PID,
  }
+ if err=h.Challenges.ClaimVerifiedProof(prepared.VerificationID);err!=nil{
+  return fail("PROOF_ALREADY_ISSUED_ON_THIS_VPS")
+ }
  signed,err:=sshproof.SignAttestation(att,h.ProofSigningKey)
  if err!=nil{return fail("SIGNING_FAILED")}
  if err=h.Outbox.Save(att.ProofID,signed);err!=nil{return fail("PROOF_OUTBOX_UNAVAILABLE")}

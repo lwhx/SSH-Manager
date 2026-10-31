@@ -96,6 +96,28 @@ func (s *ChallengeStore)Read(id string)(PreparedChallenge,error){
  if p.VerificationID!=id{return PreparedChallenge{},errors.New("challenge storage mismatch")}
  return p,nil
 }
+// ClaimVerifiedProof is an irreversible root-owned, O_EXCL one-time marker.
+// Claim only AFTER the SSH login evidence and nonce have been verified.
+// If signing or enqueue subsequently fails, the challenge is intentionally
+// unusable rather than risking repeated attestations.
+func(s *ChallengeStore)ClaimVerifiedProof(id string)error{
+ if s==nil||!uuidRE.MatchString(id){return errors.New("invalid proof claim")}
+ st,err:=os.Lstat(s.Directory)
+ if err!=nil||!st.IsDir()||st.Mode().Perm()&0077!=0{
+  return errors.New("private challenge directory unavailable")
+ }
+ owner,ok:=st.Sys().(*syscall.Stat_t)
+ if !ok||owner.Uid!=uint32(os.Geteuid()){return errors.New("untrusted challenge directory")}
+ file,err:=os.OpenFile(filepath.Join(s.Directory,id+".claimed"),os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600)
+ if errors.Is(err,os.ErrExist){return errors.New("SSH challenge has already produced a local proof")}
+ if err!=nil{return err}
+ if _,err=file.WriteString("consumed\n");err!=nil{_ = file.Close();return err}
+ if err=file.Sync();err!=nil{_ = file.Close();return err}
+ if err=file.Close();err!=nil{return err}
+ d,err:=os.Open(s.Directory);if err!=nil{return err}
+ defer d.Close();return d.Sync()
+}
+
 func (p PreparedChallenge)HashSummary()string{
  h:=sha256.Sum256([]byte(p.VerificationID+"|"+p.NonceHash+"|"+p.ConfigRevision))
  return hex.EncodeToString(h[:])
