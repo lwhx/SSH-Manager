@@ -41,6 +41,8 @@
 
 [Staging 安装器详细说明](docs/AGENT_STAGING_INSTALL.md)
 
+> **误删 Cloudflare Worker，但原 D1 仍在？** 使用 [Staging Worker 删除后的受控恢复指南](docs/CLOUDFLARE_DELETED_WORKER_RECOVERY.md)。不要删除 D1 试图绕过安全检查。
+
 ## 核心安全约束
 
 1. 只保存日常公钥和救援公钥；用户的 SSH 私钥不上传 Cloudflare/GitHub/Agent。
