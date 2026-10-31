@@ -1,4 +1,5 @@
 import {DurableObject} from "cloudflare:workers";
+import {isManualAction,verifyRootManualOutcome} from "../../../packages/protocol/src/manual";
 import {proofChallengeReadiness,verifyPinnedSSHProof,verifyPinnedSSHSignature} from "../../../packages/protocol/src/proof";
 import {ApiError,errorResponse,response,now,sha256hex,decodeBase64url,validNodeId} from "../../../packages/protocol/src/index";
 interface Env {DB:D1Database;NODE_SESSIONS:DurableObjectNamespace;COMMAND_PUBLIC_KEY:string;}
@@ -194,7 +195,8 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     ).bind(opId,id).first<any>();
     must(op,"OPERATION_NOT_FOUND",404);
     const reportedCode=String(b.result_code||"").slice(0,64);
-    const reportedDetail=JSON.stringify(b.detail||{}).slice(0,3500);
+    const reportedDetail=JSON.stringify(b.detail||{});
+    must(reportedDetail.length<=3500,"REPORT_DETAIL_TOO_LARGE",413);
     // The Agent persists results before sending them. A lost HTTP ACK must
     // permit the exact same terminal result without rerunning the operation
     // or inserting another audit row. Changed results are never accepted.
@@ -243,6 +245,32 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       const c=JSON.parse(op.command_json);
       must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
         "INSTALL_PROOF_MISSING",409);
+    }
+    let manualResult:Record<string,unknown>|null=null;
+    let signedManualCommand:any=null;
+    if(status==="SUCCEEDED"&&isManualAction(op.action)){
+      signedManualCommand=JSON.parse(op.command_json);
+      must(signedManualCommand.id===opId&&signedManualCommand.node_id===id&&
+        signedManualCommand.action===op.action&&
+        typeof signedManualCommand.expected_revision==="string"&&
+        /^[a-f0-9]{64}$/.test(signedManualCommand.expected_revision),
+        "MANUAL_COMMAND_SCOPE_INVALID",409);
+      const pinned=await env.DB.prepare(
+        "SELECT public_key FROM node_ssh_proof_keys WHERE node_id=?"
+      ).bind(id).first<{public_key:string}>();
+      must(pinned,"ROOT_MANUAL_RECEIPT_KEY_NOT_PINNED",403);
+      try{
+        manualResult=await verifyRootManualOutcome(b.detail,pinned.public_key,{
+          nodeId:id,operationId:opId,action:op.action,resultCode:reportedCode,
+          expectedRevision:signedManualCommand.expected_revision,
+          issuedAt:signedManualCommand.issued_at,expiresAt:signedManualCommand.expires_at
+        },signedManualCommand.payload);
+      }catch{throw new ApiError("ROOT_MANUAL_RECEIPT_INVALID",403);}
+      const node=await env.DB.prepare(
+        "SELECT config_revision,init_stage FROM nodes WHERE id=?"
+      ).bind(id).first<{config_revision:string;init_stage:string}>();
+      must(node&&node.config_revision===signedManualCommand.expected_revision,
+        "MANUAL_SSH_REVISION_CHANGED",409);
     }
     const t=now();
     if(status==="RUNNING"){
@@ -303,7 +331,8 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       // Idempotent policy inspection cannot downgrade an already VERIFIED
       // node or invalidate an in-flight challenge with unchanged config.
       const preserve=previous.config_revision===revision&&
-        (previous.init_stage==="WAITING_VERIFICATION"||previous.init_stage==="KEY_VERIFIED");
+        (previous.init_stage==="WAITING_VERIFICATION"||previous.init_stage==="KEY_VERIFIED"||
+         previous.init_stage==="PASSWORD_DISABLED");
       steps.push(env.DB.prepare(
         "UPDATE nodes SET config_revision=?,init_stage=? WHERE id=? AND"+committed
       ).bind(revision,preserve?previous.init_stage:"POLICY_INSPECTED",id,
@@ -331,6 +360,89 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
         "WHERE node_id=? AND status='PENDING' AND"+committed
       ).bind(t,id,opId,id,status,reportedCode));
       requiredSideEffects=2;
+    }
+    if(status==="SUCCEEDED"&&isManualAction(op.action)&&manualResult&&signedManualCommand){
+      const c=signedManualCommand;
+      const v=manualResult;
+      const assertExists=(sql:string,args:unknown[])=>{
+        // A CHECK constraint failure ABORTS the whole D1 batch, including the
+        // terminal status update. Zero-row guarded updates cannot fake success.
+        steps.push(env.DB.prepare(
+          "INSERT INTO manual_ssh_assertions(value) SELECT 0 WHERE NOT EXISTS ("+sql+")"
+        ).bind(...args));
+      };
+      assertExists(
+        "SELECT 1 FROM nodes WHERE id=? AND config_revision=?",
+        [id,c.expected_revision]
+      );
+      if(op.action==="ssh.password.disable"){
+        assertExists(
+          "SELECT 1 FROM nodes n JOIN ssh_verifications v ON v.node_id=n.id "+
+          "WHERE n.id=? AND n.init_stage='KEY_VERIFIED' AND v.id=? AND v.proof_id=? "+
+          "AND v.status='VERIFIED' AND v.login_user=n.login_user "+
+          "AND v.config_revision=n.config_revision",
+          [id,c.payload.verification_id,c.payload.proof_id]
+        );
+        steps.push(env.DB.prepare(
+          "INSERT INTO ssh_config_snapshots "+
+          "(id,node_id,local_ref,config_hash,revision,created_at,source_operation_id) "+
+          "SELECT ?,?,?,?,?,?,? WHERE"+committed
+        ).bind(crypto.randomUUID(),id,v.snapshot_ref,v.config_hash,v.after_revision,t,opId,
+          opId,id,status,reportedCode));
+        steps.push(env.DB.prepare(
+          "UPDATE nodes SET config_revision=?,init_stage='PASSWORD_DISABLED' "+
+          "WHERE id=? AND config_revision=? AND init_stage='KEY_VERIFIED' AND"+committed
+        ).bind(v.after_revision,id,c.expected_revision,opId,id,status,reportedCode));
+        assertExists(
+          "SELECT 1 FROM ssh_config_snapshots s JOIN nodes n ON n.id=s.node_id "+
+          "WHERE s.node_id=? AND s.source_operation_id=? AND s.local_ref=? "+
+          "AND n.config_revision=s.revision AND n.init_stage='PASSWORD_DISABLED'",
+          [id,opId,v.snapshot_ref]
+        );
+      }else if(op.action==="ssh.password.restore"||op.action==="ssh.config.rollback"){
+        assertExists(
+          "SELECT 1 FROM ssh_config_snapshots WHERE node_id=? AND local_ref=? "+
+          "AND revision=? AND restored_at IS NULL",
+          [id,c.payload.snapshot_ref,c.expected_revision]
+        );
+        steps.push(env.DB.prepare(
+          "UPDATE ssh_config_snapshots SET restored_at=? WHERE node_id=? AND local_ref=? "+
+          "AND revision=? AND restored_at IS NULL AND"+committed
+        ).bind(t,id,c.payload.snapshot_ref,c.expected_revision,opId,id,status,reportedCode));
+        steps.push(env.DB.prepare(
+          "UPDATE nodes SET config_revision=?,init_stage='POLICY_INSPECTED' "+
+          "WHERE id=? AND config_revision=? AND init_stage='PASSWORD_DISABLED' AND"+committed
+        ).bind(v.after_revision,id,c.expected_revision,opId,id,status,reportedCode));
+        assertExists(
+          "SELECT 1 FROM ssh_config_snapshots s JOIN nodes n ON n.id=s.node_id "+
+          "WHERE s.node_id=? AND s.local_ref=? AND s.restored_at IS NOT NULL "+
+          "AND n.config_revision=? AND n.init_stage='POLICY_INSPECTED'",
+          [id,c.payload.snapshot_ref,v.after_revision]
+        );
+      }else if(op.action==="ssh.rescue.enable"){
+        steps.push(env.DB.prepare(
+          "INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) "+
+          "SELECT ?,?,?,?,'rescue','installed' WHERE"+committed+" AND "+
+          "EXISTS (SELECT 1 FROM public_keys WHERE id=? AND purpose='rescue' AND active=1)"
+        ).bind(crypto.randomUUID(),id,c.payload.key_id,c.payload.login_user,
+          opId,id,status,reportedCode,c.payload.key_id));
+        assertExists(
+          "SELECT 1 FROM node_keys WHERE node_id=? AND public_key_id=? "+
+          "AND login_user=? AND purpose='rescue' AND state='installed'",
+          [id,c.payload.key_id,c.payload.login_user]
+        );
+      }else if(op.action==="ssh.rescue.revoke"){
+        steps.push(env.DB.prepare(
+          "UPDATE node_keys SET state='revoked' "+
+          "WHERE node_id=? AND public_key_id=? AND login_user=? "+
+          "AND purpose='rescue' AND state='installed' AND"+committed
+        ).bind(id,c.payload.key_id,c.payload.login_user,opId,id,status,reportedCode));
+        assertExists(
+          "SELECT 1 FROM node_keys WHERE node_id=? AND public_key_id=? "+
+          "AND login_user=? AND purpose='rescue' AND state='revoked'",
+          [id,c.payload.key_id,c.payload.login_user]
+        );
+      }
     }
     steps.push(env.DB.prepare(
       "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
