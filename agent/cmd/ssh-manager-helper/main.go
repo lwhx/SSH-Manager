@@ -4,6 +4,8 @@ package main
 
 import (
  "context"
+ "crypto/ed25519"
+ "flag"
  "encoding/json"
  "errors"
  "fmt"
@@ -18,12 +20,16 @@ import (
  "time"
 
  "github.com/lwhx/SSH-Manager/agent/internal/sshhelper"
+ "github.com/lwhx/SSH-Manager/agent/internal/sshproof"
 )
 
 const configPath="/etc/ssh-manager/helper.json"
 const socketPath="/run/ssh-manager/helper.sock"
 const journalPath="/var/lib/ssh-manager-root/operations"
 const challengePath="/var/lib/ssh-manager-root/challenges"
+const rootProofKeyPath="/var/lib/ssh-manager-root/proof_ed25519"
+const rootOutboxPath="/var/lib/ssh-manager-root/proof-outbox"
+const proofSocketPath="/run/ssh-manager-proof/proof.sock"
 
 func loadConfig()(sshhelper.Config,error){
  var c sshhelper.Config
@@ -79,8 +85,77 @@ func handle(conn *net.UnixConn,uid uint32,helper *sshhelper.Handler){
  }
  _=json.NewEncoder(conn).Encode(result)
 }
+func peerCredentials(conn *net.UnixConn)(*syscall.Ucred,error){
+ raw,err:=conn.SyscallConn();if err!=nil{return nil,err}
+ var cred *syscall.Ucred
+ var callErr error
+ if err=raw.Control(func(fd uintptr){
+  cred,callErr=syscall.GetsockoptUcred(int(fd),syscall.SOL_SOCKET,syscall.SO_PEERCRED)
+ });err!=nil{return nil,err}
+ if callErr!=nil||cred==nil{return nil,errors.New("SO_PEERCRED unavailable")}
+ return cred,nil
+}
+func handleProof(conn *net.UnixConn,h *sshhelper.Handler){
+ defer conn.Close()
+ _=conn.SetDeadline(time.Now().Add(12*time.Second))
+ creds,err:=peerCredentials(conn)
+ if err!=nil{return}
+ raw,err:=io.ReadAll(io.LimitReader(conn,512))
+ if err!=nil||len(raw)>511{
+  _=json.NewEncoder(conn).Encode(sshhelper.ProofResult{Code:"INVALID_PROOF_REQUEST"})
+  return
+ }
+ var request sshhelper.ProofRequest
+ if json.Unmarshal(raw,&request)!=nil||request.VerificationID==""{
+  _=json.NewEncoder(conn).Encode(sshhelper.ProofResult{Code:"INVALID_PROOF_REQUEST"})
+  return
+ }
+ ctx,cancel:=context.WithTimeout(context.Background(),9*time.Second)
+ defer cancel()
+ // The only untrusted input here is challenge ID + nonce. The UID/PID comes
+ // from kernel SO_PEERCRED. No shell commands or sudo are used by the caller.
+ result:=h.ProveSession(ctx,int(creds.Pid),int(creds.Uid),request)
+ _=json.NewEncoder(conn).Encode(result)
+}
+func serveProofSocket(h *sshhelper.Handler,groupID int)error{
+ dir:=filepath.Dir(proofSocketPath)
+ info,err:=os.Lstat(dir)
+ if err!=nil||!info.IsDir(){return errors.New("proof runtime directory missing")}
+ owner,ok:=info.Sys().(*syscall.Stat_t)
+ if !ok||owner.Uid!=0||info.Mode().Perm()&0022!=0{
+  return errors.New("proof runtime directory must be root-owned and nonwritable")
+ }
+ if _,err=os.Lstat(proofSocketPath);err==nil{
+  return errors.New("refusing to overwrite existing proof socket")
+ }else if !errors.Is(err,os.ErrNotExist){return err}
+ listener,err:=net.ListenUnix("unix",&net.UnixAddr{Name:proofSocketPath,Net:"unix"})
+ if err!=nil{return err}
+ defer listener.Close()
+ if err=os.Chown(proofSocketPath,0,groupID);err!=nil{return err}
+ if err=os.Chmod(proofSocketPath,0660);err!=nil{return err}
+ for{
+  conn,err:=listener.AcceptUnix()
+  if err!=nil{return err}
+  // Bounded concurrent proof sessions are required on a real VPS.
+  // The semaphore prevents a local user from exhausting root helper memory.
+  proofSemaphore<-struct{}{}
+  go func(){defer func(){<-proofSemaphore}();handleProof(conn,h)}()
+ }
+}
+var proofSemaphore=make(chan struct{},4)
+
 func main(){
  if os.Geteuid()!=0{log.Fatal("ssh-manager-helper must run as root")}
+ initKey:=flag.Bool("init-proof-key",false,"explicitly create a root-only per-node proof identity")
+ flag.Parse()
+ if *initKey{
+  if flag.NArg()!=0{log.Fatal("unexpected positional arguments")}
+  if err:=os.MkdirAll(filepath.Dir(rootProofKeyPath),0700);err!=nil{log.Fatal(err)}
+  public,err:=sshproof.GenerateRootProofKey(rootProofKeyPath)
+  if err!=nil{log.Fatal(err)}
+  fmt.Println(public)
+  return
+ }
  conf,err:=loadConfig()
  if err!=nil{log.Fatal(err)}
  agentAccount,err:=user.Lookup("ssh-manager")
@@ -104,7 +179,25 @@ func main(){
  if err=os.Chown(socketPath,0,gid);err!=nil{log.Fatal(err)}
  if err=os.Chmod(socketPath,0660);err!=nil{log.Fatal(err)}
  if err=os.MkdirAll(journalPath,0700);err!=nil{log.Fatal(err)}
- helper:=&sshhelper.Handler{Config:conf,Journal:&sshhelper.Journal{Directory:journalPath},Challenges:&sshhelper.ChallengeStore{Directory:challengePath}}
+ var proofSigningKey ed25519.PrivateKey
+ if conf.EnableSSHProof{
+  proofSigningKey,err=sshproof.LoadRootProofKey(rootProofKeyPath)
+  if err!=nil{log.Fatal("proof key not provisioned: ",err)}
+  if err=os.MkdirAll(rootOutboxPath,0700);err!=nil{log.Fatal(err)}
+ }
+ helper:=&sshhelper.Handler{
+  Config:conf,Journal:&sshhelper.Journal{Directory:journalPath},
+  Challenges:&sshhelper.ChallengeStore{Directory:challengePath},
+  Outbox:&sshhelper.Outbox{Directory:rootOutboxPath},
+  ProofSigningKey:proofSigningKey,
+ }
+ if conf.EnableSSHProof{
+  loginUser,err:=user.Lookup(conf.AllowedUser)
+  if err!=nil{log.Fatal(err)}
+  loginGID,err:=strconv.Atoi(loginUser.Gid)
+  if err!=nil{log.Fatal(err)}
+  go func(){log.Fatal("proof socket stopped: ",serveProofSocket(helper,loginGID))}()
+ }
  log.Printf("SSH Manager helper listening (node=%s, daily_install=%t)",conf.NodeID,conf.EnableDailyInstall)
  for{
   conn,err:=listener.AcceptUnix()

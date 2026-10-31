@@ -6,6 +6,7 @@ package sshhelper
 import (
  "context"
  "crypto/ed25519"
+ "sync"
  "crypto/ed25519"
  "encoding/base64"
  "encoding/json"
@@ -70,6 +71,7 @@ type AccountLookup func(string)(*user.User,error)
 type KeyInstaller func(string,int,int,string,string)(sshkeys.Result,error)
 
 type Handler struct{
+ defaultsOnce sync.Once
  Config Config
  Inspect PolicyReader
  Lookup AccountLookup
@@ -82,11 +84,13 @@ type Handler struct{
  EUID func()int
 }
 func (h *Handler) defaults(){
- if h.Inspect==nil{h.Inspect=InspectEffective}
- if h.Lookup==nil{h.Lookup=user.Lookup}
- if h.Install==nil{h.Install=sshkeys.InstallDaily}
- if h.Clock==nil{h.Clock=time.Now}
- if h.EUID==nil{h.EUID=os.Geteuid}
+ h.defaultsOnce.Do(func(){
+  if h.Inspect==nil{h.Inspect=InspectEffective}
+  if h.Lookup==nil{h.Lookup=user.Lookup}
+  if h.Install==nil{h.Install=sshkeys.InstallDaily}
+  if h.Clock==nil{h.Clock=time.Now}
+  if h.EUID==nil{h.EUID=os.Geteuid}
+ })
 }
 func (c Config) Validate()error{
  if !uuidRE.MatchString(c.NodeID){return errors.New("invalid configured node ID")}
