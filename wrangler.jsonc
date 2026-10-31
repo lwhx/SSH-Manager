@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ssh-manager-staging",
+  "main": "apps/single-worker/src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./apps/console/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "vars": {
+    "CONTROL_HOSTNAME": "unconfigured.invalid",
+    "AGENT_HOSTNAME": "unconfigured.invalid",
+    "MANUAL_SSH_ACTIONS_ENABLED": "false"
+  }
+}
