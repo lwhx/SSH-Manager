@@ -1,0 +1,201 @@
+package main
+
+import (
+ "bytes"
+ "context"
+ "crypto/ed25519"
+ "crypto/rand"
+ "crypto/sha256"
+ "encoding/base64"
+ "encoding/hex"
+ "encoding/json"
+ "errors"
+ "flag"
+ "fmt"
+ "io"
+ "log"
+ "net/http"
+ "os"
+ "os/signal"
+ "strings"
+ "syscall"
+ "time"
+)
+
+type Config struct {
+ Gateway string `json:"gateway"`
+ NodeID string `json:"node_id"`
+ DeviceKey string `json:"device_key"`
+ CommandPublicKey string `json:"command_public_key"`
+ StateDir string `json:"state_dir"`
+ HelperSocket string `json:"helper_socket"`
+}
+type Command struct {
+ V int `json:"v"`
+ ID string `json:"id"`
+ NodeID string `json:"node_id"`
+ Action string `json:"action"`
+ Actor string `json:"actor"`
+ IssuedAt int64 `json:"issued_at"`
+ ExpiresAt int64 `json:"expires_at"`
+ ExpectedRevision string `json:"expected_revision"`
+ Payload json.RawMessage `json:"payload"`
+}
+type SignedCommand struct {
+ Command string `json:"command"`
+ Signature string `json:"signature"`
+}
+type Agent struct { config Config; secret ed25519.PrivateKey; http *http.Client }
+func decode(s string)([]byte,error){return base64.RawURLEncoding.DecodeString(s)}
+func encode(b []byte)string{return base64.RawURLEncoding.EncodeToString(b)}
+func (a *Agent) request(ctx context.Context,path string,body any)([]byte,error){
+ raw,err:=json.Marshal(body);if err!=nil{return nil,err}
+ u:=strings.TrimRight(a.config.Gateway,"/")+path
+ if !strings.HasPrefix(u,"https://"){return nil,errors.New("agent gateway must use HTTPS")}
+ req,err:=http.NewRequestWithContext(ctx,"POST",u,bytes.NewReader(raw));if err!=nil{return nil,err}
+ now:=time.Now().Unix()
+ nonce:=make([]byte,24);if _,err=rand.Read(nonce);err!=nil{return nil,err}
+ digest:=sha256.Sum256(raw)
+ message:=fmt.Sprintf("POST\n%s\n%d\n%s\n%s",path,now,encode(nonce),hex.EncodeToString(digest[:]))
+ req.Header.Set("Content-Type","application/json")
+ req.Header.Set("X-Node-Id",a.config.NodeID)
+ req.Header.Set("X-Device-Timestamp",fmt.Sprint(now))
+ req.Header.Set("X-Device-Nonce",encode(nonce))
+ req.Header.Set("X-Device-Signature",encode(ed25519.Sign(a.secret,[]byte(message))))
+ res,err:=a.http.Do(req);if err!=nil{return nil,err};defer res.Body.Close()
+ b,err:=io.ReadAll(io.LimitReader(res.Body,65536));if err!=nil{return nil,err}
+ if res.StatusCode!=200{return nil,parseGatewayHTTPError(res.StatusCode,b)}
+ return b,nil
+}
+func readConfig(path string)(Config,ed25519.PrivateKey,error){
+ b,err:=readAgentConfigBytes(path);if err!=nil{return Config{},nil,err}
+ var c Config
+ if err=json.Unmarshal(b,&c);err!=nil{return c,nil,err}
+ if err=normalizeAgentConfig(&c);err!=nil{return c,nil,err}
+ pk,err:=decode(c.DeviceKey);if err!=nil{return c,nil,err}
+ sign,err:=decode(c.CommandPublicKey);if err!=nil{return c,nil,err}
+ if len(pk)!=ed25519.PrivateKeySize||len(sign)!=ed25519.PublicKeySize{
+  return c,nil,errors.New("invalid device or command signing key")
+ }
+ return c,ed25519.PrivateKey(pk),nil
+}
+func (a *Agent) verify(s SignedCommand)(Command,error){
+ var c Command
+ pub,err:=decode(a.config.CommandPublicKey);if err!=nil{return c,err}
+ sig,err:=decode(s.Signature);if err!=nil{return c,err}
+ if len(pub)!=ed25519.PublicKeySize||!ed25519.Verify(ed25519.PublicKey(pub),[]byte(s.Command),sig){return c,errors.New("invalid control signature")}
+ if err=json.Unmarshal([]byte(s.Command),&c);err!=nil{return c,err}
+ now:=time.Now().Unix()
+ if c.NodeID!=a.config.NodeID||c.V!=1||!operationID.MatchString(c.ID)||c.IssuedAt>now+10||c.ExpiresAt<=now||c.ExpiresAt>c.IssuedAt+60 {return c,errors.New("invalid or expired command")}
+ if c.Action!="node.preflight"&&c.Action!="node.status"&&c.Action!="ssh.daily.install"&&c.Action!="ssh.policy.inspect"&&c.Action!="ssh.verification.prepare"&&
+  c.Action!="ssh.password.disable"&&c.Action!="ssh.password.restore"&&c.Action!="ssh.config.rollback"&&
+  c.Action!="ssh.rescue.enable"&&c.Action!="ssh.rescue.revoke"{return c,errors.New("action not allowed")}
+ return c,nil
+}
+func report(a *Agent,ctx context.Context,id,status,code string,detail any){
+ if err:=a.enqueueOperationReport(id,status,code,detail);err!=nil{
+  log.Printf("cannot persist operation result %s (requires operator review): %v",id,err)
+  return
+ }
+ a.drainOperationReports(ctx)
+}
+func (a *Agent) handle(ctx context.Context,s SignedCommand){
+ c,err:=a.verify(s);if err!=nil{log.Printf("rejected command: %v",err);return}
+ if err:=a.claimOperation(c);err!=nil{
+  log.Printf("blocked duplicate/unsafe operation %s: %v",c.ID,err)
+  return
+ }
+ switch c.Action{
+ case "ssh.daily.install","ssh.policy.inspect","ssh.verification.prepare",
+  "ssh.password.disable","ssh.password.restore","ssh.config.rollback","ssh.rescue.enable","ssh.rescue.revoke":
+  result,err:=a.sendToLocalHelper(ctx,s)
+  if err!=nil{
+   // The socket may have dropped AFTER Root Helper changed authorized_keys.
+   // No FAILED result is trustworthy until the root-only journal confirms
+   // an actual terminal outcome. Never re-execute the signed command.
+   log.Printf("Root operation %s response uncertain: %v",c.ID,err)
+   a.recoverSingleRootOperation(ctx,c.ID,c.Action)
+   break
+  }
+  if !result.OK{
+   report(a,ctx,c.ID,"FAILED",result.Code,result.Detail)
+   break
+  }
+  report(a,ctx,c.ID,"SUCCEEDED",result.Code,result.Detail)
+ case "node.preflight":
+  report(a,ctx,c.ID,"SUCCEEDED","READ_ONLY_DIAGNOSTIC",readOnlyPreflight())
+ case "node.status":
+  report(a,ctx,c.ID,"SUCCEEDED","TRANSPORT_ALIVE",map[string]string{"agent_version":"0.2.0"})
+ default:
+  report(a,ctx,c.ID,"FAILED","ACTION_NOT_SUPPORTED",nil)
+ }
+}
+func run(ctx context.Context,path string)error {
+ c,key,err:=readConfig(path);if err!=nil{return err}
+ a:=&Agent{config:c,secret:key,http:&http.Client{Timeout:12*time.Second}}
+ go a.websocketLoop(ctx)
+ ticker:=time.NewTicker(10*time.Second);defer ticker.Stop()
+ for {
+   select{case <-ctx.Done():return nil;default:}
+   heartbeatCtx,cancel:=context.WithTimeout(ctx,10*time.Second)
+   _,err=a.request(heartbeatCtx,"/agent/v1/heartbeat",map[string]string{"agent_version":"0.1.0","os_id":"linux"})
+   cancel()
+   if err!=nil{log.Printf("heartbeat: %v",err)}
+   a.recoverClaimedOperations(ctx)
+   a.drainOperationReports(ctx)
+   a.drainProofOutbox(ctx)
+   pollCtx,cancel:=context.WithTimeout(ctx,10*time.Second)
+   raw,err:=a.request(pollCtx,"/agent/v1/poll",map[string]string{})
+   cancel()
+   if err==nil {
+     var value struct{Command string `json:"command"`; Signature string `json:"signature"`}
+     if json.Unmarshal(raw,&value)==nil&&value.Command!=""{a.handle(ctx,SignedCommand(value))}
+   }else{log.Printf("poll: %v",err)}
+   select{case <-ctx.Done():return nil;case <-ticker.C:}
+ }
+}
+func pair(ctx context.Context,gateway,node,token,path string)error{
+ preflight:=Config{Gateway:gateway,NodeID:node,StateDir:defaultAgentStateDir,
+  HelperSocket:defaultAgentHelperSocket}
+ if err:=normalizeAgentConfig(&preflight);err!=nil{return err}
+ if err:=validatePairingDestination(path);err!=nil{return err}
+ _,private,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{return err}
+ body,_:=json.Marshal(map[string]string{"node_id":node,"token":token,"public_key":encode(private.Public().(ed25519.PublicKey))})
+ req,err:=http.NewRequestWithContext(ctx,"POST",strings.TrimRight(gateway,"/")+"/agent/v1/pair",bytes.NewReader(body));if err!=nil{return err}
+ req.Header.Set("Content-Type","application/json")
+ client:=&http.Client{Timeout:15*time.Second}
+ res,err:=client.Do(req);if err!=nil{return err};defer res.Body.Close()
+ b,_:=io.ReadAll(io.LimitReader(res.Body,8192))
+ if res.StatusCode!=201{return fmt.Errorf("pairing failed HTTP %d: %s",res.StatusCode,b)}
+ var result struct{CommandSigningPublicKey string `json:"command_signing_public_key"`}
+ if err=json.Unmarshal(b,&result);err!=nil{return err}
+ public,err:=decode(result.CommandSigningPublicKey);if err!=nil||len(public)!=ed25519.PublicKeySize{return errors.New("invalid server command signing key")}
+ conf:=Config{Gateway:gateway,NodeID:node,DeviceKey:encode(private),
+  CommandPublicKey:result.CommandSigningPublicKey,
+  StateDir:defaultAgentStateDir,HelperSocket:defaultAgentHelperSocket}
+ if err=savePairingConfig(path,conf);err!=nil{return err}
+ fmt.Println("Device paired. Dedicated Agent config stored securely; Helper socket and state directory configured.")
+ return nil
+}
+func main(){
+ mode:=flag.String("mode","run","run or pair")
+ config:=flag.String("config","/etc/ssh-manager/agent.json","agent config path")
+ gateway:=flag.String("gateway","","HTTPS gateway URL (pair only)")
+ node:=flag.String("node","","node UUID (pair only)")
+ token:=flag.String("token","","short-lived pairing token (pair only; unsafe in process list)")
+ tokenStdin:=flag.Bool("token-stdin",false,"read pairing token from stdin instead of argv")
+ flag.Parse()
+ ctx,stop:=signal.NotifyContext(context.Background(),syscall.SIGTERM,syscall.SIGINT);defer stop()
+ var err error
+ switch *mode {case "run":err=run(ctx,*config);case "pair":
+  if *tokenStdin{
+   if *token!=""{log.Fatal("choose token or token-stdin, not both")}
+   b,readErr:=io.ReadAll(io.LimitReader(os.Stdin,512))
+   if readErr!=nil{log.Fatal(readErr)}
+   *token=strings.TrimSpace(string(b))
+  }
+  if *gateway==""||*node==""||*token==""{log.Fatal("pair requires gateway, node, token")}
+  err=pair(ctx,*gateway,*node,*token,*config)
+ default:err=errors.New("unknown mode")}
+ if err!=nil{log.Fatal(err)}
+}

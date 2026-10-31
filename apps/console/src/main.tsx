@@ -1,0 +1,190 @@
+import React,{useEffect,useState} from "react";
+import{createRoot}from"react-dom/client";
+import "./style.css";
+import ManualOperations from "./ManualOperations";
+type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:string;status:string;init_stage:string;last_seen_at?:number;config_revision:string};
+type KeyInfo={id:string;purpose:string;fingerprint:string;public_key:string;version:number;name:string};
+type VerificationInfo={id:string;status:string;expires_at:number;fingerprint:string;login_user:string;token?:string;prepared_at?:number|null};
+async function api<T>(path:string,method="GET",data?:unknown,headers?:Record<string,string>):Promise<T>{
+ const res=await fetch("/api/v1"+path,{method,headers:{"Content-Type":"application/json",...headers},body:data?JSON.stringify(data):undefined,credentials:"same-origin"});
+ const result:any=await res.json();
+ if(!res.ok)throw new Error(result.error||"REQUEST_FAILED");return result;
+}
+function App(){
+ const [me,setMe]=useState<{email:string;role:string;manual_ssh_actions_enabled:boolean}|null>(null);
+ const [nodes,setNodes]=useState<NodeInfo[]>([]);
+ const [keys,setKeys]=useState<KeyInfo[]>([]);
+ const [page,setPage]=useState<"dashboard"|"nodes"|"keys"|"audit">("dashboard");
+ const [selected,setSelected]=useState<NodeInfo|null>(null);
+ const [message,setMessage]=useState("");
+ const [draft,setDraft]=useState({name:"",ssh_host:"",login_user:"root",ssh_port:22});
+ const [pair,setPair]=useState<{node_id:string;token:string}|null>(null);
+ const [keyInput,setKeyInput]=useState({daily:"",rescue:""});
+ const [audit,setAudit]=useState<any[]>([]);
+ const [operation,setOperation]=useState<string|null>(null);
+ const [verification,setVerification]=useState<VerificationInfo|null>(null);
+ const [proofPublicInput,setProofPublicInput]=useState("");
+ const [proofFingerprintInput,setProofFingerprintInput]=useState("");
+ const [pinnedRootProof,setPinnedRootProof]=useState<{fingerprint:string}|null>(null);
+ const [linkToken,setLinkToken]=useState("");
+ const [linkInput,setLinkInput]=useState("");
+ const [operationState,setOperationState]=useState<{status:string;result_code?:string;detail?:string}|null>(null);
+ const [busy,setBusy]=useState(false);
+ const owner=me?.role==="owner";
+ function alertError(e:unknown){setMessage(e instanceof Error?e.message:String(e));}
+ async function refresh(){
+  try{
+   const u=await api<{email:string;role:string;manual_ssh_actions_enabled:boolean}>("/me");setMe(u);
+   const n=await api<{nodes:NodeInfo[]}>("/nodes");setNodes(n.nodes);
+   setSelected(previous=>previous?n.nodes.find(node=>node.id===previous.id)||null:null);
+   if(u.role!=="viewer"){const k=await api<{keys:KeyInfo[]}>("/keys");setKeys(k.keys);}
+  }catch(e){alertError(e);}
+ }
+ useEffect(()=>{void refresh();},[]);
+ useEffect(()=>{
+  if(!selected||!me||me.role==="viewer"){setPinnedRootProof(null);return;}
+  let live=true;
+  void api<{pinned:{fingerprint:string}|null}>("/nodes/"+selected.id+"/ssh-proof-key")
+   .then(v=>{if(live)setPinnedRootProof(v.pinned)})
+   .catch(e=>{if(live)alertError(e)});
+  return()=>{live=false};
+ },[selected?.id,me?.role]);
+
+ useEffect(()=>{
+  if(!selected||!verification||verification.status!=="PENDING")return;
+  let running=true;
+  const update=async()=>{
+   try{
+    const reply=await api<{verification:{id:string;status:string;expires_at:number;prepared_at?:number|null}}>(
+      "/nodes/"+selected.id+"/ssh-verification/"+verification.id);
+    if(running)setVerification(previous=>previous&&previous.id===reply.verification.id?
+      {...previous,status:reply.verification.status,expires_at:reply.verification.expires_at,prepared_at:reply.verification.prepared_at}:previous);
+   }catch(e){if(running)alertError(e);}
+  };
+  void update();
+  const timer=setInterval(()=>void update(),3000);
+  return()=>{running=false;clearInterval(timer);};
+ },[selected?.id,verification?.id,verification?.status]);
+
+ useEffect(()=>{
+  if(operationState?.status==="SUCCEEDED")void refresh();
+ },[operation,operationState?.status]);
+ useEffect(()=>{
+  if(!operation)return;
+  let active=true;
+  const check=async()=>{
+   try{
+    const r=await api<{operation:{status:string;result_code?:string;detail?:string}}>("/operations/"+operation);
+    if(active)setOperationState(r.operation);
+   }catch(e){if(active)alertError(e);}
+  };
+  void check();
+  const interval=setInterval(()=>void check(),2500);
+  return ()=>{active=false;clearInterval(interval);};
+ },[operation]);
+ async function act(cb:()=>Promise<void>){setBusy(true);setMessage("");try{await cb();await refresh();}catch(e){alertError(e);}finally{setBusy(false);}}
+ async function createLink(){
+  await act(async()=>{
+   const result=await api<{token:string}>("/identity/link-start","POST",{});
+   setLinkToken(result.token);
+   setMessage("绑定码仅显示在当前会话，5分钟后过期。请在另一种 Cloudflare Access 登录方式下使用。");
+  });
+ }
+ async function claimLink(){
+  await act(async()=>{
+   await api("/identity/link-claim","POST",{token:linkInput});
+   setLinkInput("");
+   setMessage("身份绑定成功。");
+  });
+ }
+ async function createNode(){await act(async()=>{const result=await api<{node_id:string;token:string}>("/nodes","POST",draft);setPair(result);setDraft({name:"",ssh_host:"",login_user:"root",ssh_port:22});setPage("nodes");});}
+ async function saveKey(kind:"daily"|"rescue"){await act(async()=>{const k=await api<{fingerprint:string}>("/keys/"+kind,"PUT",{public_key:keyInput[kind],name:kind});setKeyInput(v=>({...v,[kind]:""}));setMessage("公钥已保存："+k.fingerprint+"。保存不会在 VPS 上启用救援公钥。");});}
+ async function preflight(node:NodeInfo){
+  await act(async()=>{
+   const result=await api<{operation_id:string}>("/nodes/"+node.id+"/preflight","POST",{},{"Idempotency-Key":crypto.randomUUID()});
+   setOperation(result.operation_id);setOperationState(null);
+   setMessage("只读诊断任务已创建；执行结果会单独显示。");
+  });
+ }
+ async function inspectPolicy(node:NodeInfo){
+  await act(async()=>{
+   const result=await api<{operation_id:string}>("/nodes/"+node.id+"/ssh-policy/inspect","POST",{},{"Idempotency-Key":crypto.randomUUID()});
+   setOperation(result.operation_id);setOperationState(null);
+   setMessage("已请求检查 sshd 最终生效配置。Agent 必须连接独立 Root Helper 才能完成。");
+  });
+ }
+ async function pinRootProof(node:NodeInfo){
+  if(!confirm("只绑定 "+node.name+" 的 Root Helper 证明公钥？请先通过 VPS 控制台独立核对公钥和指纹。"))return;
+  await act(async()=>{
+   const result=await api<{fingerprint:string}>("/nodes/"+node.id+"/ssh-proof-key","POST",{
+    public_key:proofPublicInput.trim(),confirm_node_id:node.id,
+    confirm_fingerprint:proofFingerprintInput.trim()
+   });
+   setPinnedRootProof({fingerprint:result.fingerprint});
+   setProofPublicInput("");setProofFingerprintInput("");
+   setMessage("仅为本台 VPS 固定 Root Helper 证明公钥："+result.fingerprint+"。绑定不会修改 SSH 登录方式。");
+  });
+ }
+ async function beginVerification(node:NodeInfo){
+  await act(async()=>{
+   const result=await api<{
+    verification_id:string;token:string;expires_at:number;
+    login_user:string;fingerprint:string;status:string;trusted_proof_available:boolean;preparation_operation_id:string;
+   }>("/nodes/"+node.id+"/ssh-verification/start","POST",{});
+   setVerification({id:result.verification_id,status:result.status,expires_at:result.expires_at,
+     login_user:result.login_user,fingerprint:result.fingerprint,token:result.token,prepared_at:null});
+   setOperation(result.preparation_operation_id);setOperationState(null);
+   setMessage("挑战已签发，正在请求当前 VPS 的 Root Helper 本地准备；这不代表 SSH 登录验证成功。");
+  });
+ }
+ async function cancelVerification(node:NodeInfo){
+  if(!verification)return;
+  await act(async()=>{
+   await api("/nodes/"+node.id+"/ssh-verification/"+verification.id+"/cancel","POST",{});
+   setVerification(previous=>previous?{...previous,status:"CANCELLED"}:null);
+   setMessage("验证挑战已撤销；SSH 配置未被修改。");
+  });
+ }
+ async function installDaily(node:NodeInfo){
+  if(!confirm("仅对 "+node.name+"（"+node.login_user+"）部署日常公钥？不关闭密码登录。"))return;
+  await act(async()=>{const result=await api<{operation_id:string}>("/nodes/"+node.id+"/daily-key/install","POST",{},{"Idempotency-Key":crypto.randomUUID()});setOperation(result.operation_id);setOperationState(null);setMessage("已请求安装；需要等待 Agent 回报，不代表已经安装成功。");});
+ }
+ async function loadAudit(){await act(async()=>{setAudit((await api<{entries:any[]}>("/audit")).entries);setPage("audit");});}
+ const nav=[["dashboard","仪表盘"],["nodes","VPS 管理"],["keys","双公钥管理"],["audit","操作审计"]] as const;
+ return <div className="layout"><aside className="sidebar"><h2>🛡️ SSH Manager</h2><small>Cloudflare · Agent 安全管理</small><nav>{nav.map(([id,title])=><button key={id} className={page===id?"active":""} onClick={()=>{setPage(id);setSelected(null);if(id==="audit")void loadAudit();}}>{title}</button>)}</nav><div className="account">{me?me.email+" · "+me.role:"等待 Cloudflare Access 验证"}</div></aside><main className="main">
+ <header><div><h1>{page==="dashboard"?"安全总览":page==="nodes"?"VPS 节点管理":page==="keys"?"SSH 公钥管理":"操作审计"}</h1><p>危险 SSH 修改只能逐台人工确认，经 Root Helper 独立签名回执验收，永不自动回滚。</p></div><button className="secondary" onClick={()=>void refresh()}>刷新数据</button></header>
+ {message&&<div className="notice" role="status">{message}<button onClick={()=>setMessage("")}>×</button></div>}
+ {!me&&<section className="card"><h3>等待 SSH Manager 授权</h3><p>请先通过 Cloudflare Access 使用 GitHub 或 Cloudflare 账户认证。如果这是第二个身份提供方，需要 Owner 从已授权会话生成一次性绑定码。</p><label>5 分钟身份绑定码<input value={linkInput} onChange={e=>setLinkInput(e.target.value)} placeholder="粘贴已授权 Owner 提供的绑定码"/></label><button disabled={busy||!linkInput.trim()} onClick={()=>void claimLink()}>验证并绑定另一登录身份</button></section>}
+ {me&&page==="dashboard"&&<><div className="stats"><section className="card"><small>节点总数</small><strong>{nodes.length}</strong></section><section className="card"><small>Agent 在线</small><strong>{nodes.filter(n=>n.status==="online"&&(n.last_seen_at||0)>Date.now()/1000-90).length}</strong></section><section className="card"><small>待验证节点</small><strong>{nodes.filter(n=>n.init_stage!=="COMPLETE").length}</strong></section></div><section className="card"><h3>安全边界</h3><p>日常公钥初始化与可信 SSH 验证是正式关闭密码登录的前置条件。紧急救援公钥仅可由管理员在单台 VPS 上手动启用。当前基础版本不允许任何自动回滚。</p><button onClick={()=>setPage("nodes")}>进入节点管理</button></section></>}
+ {me&&page==="nodes"&&<div className="columns"><div><section className="card"><h3>VPS 列表</h3>{nodes.map(n=><button key={n.id} className="node" onClick={()=>{setSelected(n);setOperation(null);setOperationState(null);setVerification(null);setPinnedRootProof(null);setProofPublicInput("");setProofFingerprintInput("");}}><b>{n.name}</b><span>{n.ssh_host}:{n.ssh_port} · {n.login_user}</span><em>{n.init_stage} · {n.status}</em></button>)}{!nodes.length&&<p>暂无 VPS。请先添加并配对 Agent。</p>}</section>{me.role!=="viewer"&&<section className="card"><h3>添加 VPS</h3><label>节点名称<input value={draft.name} onChange={e=>setDraft(v=>({...v,name:e.target.value}))}/></label><label>服务器 IP 或域名<input value={draft.ssh_host} onChange={e=>setDraft(v=>({...v,ssh_host:e.target.value}))}/></label><label>登录用户<input value={draft.login_user} onChange={e=>setDraft(v=>({...v,login_user:e.target.value}))}/></label><label>SSH 端口<input type="number" value={draft.ssh_port} onChange={e=>setDraft(v=>({...v,ssh_port:Number(e.target.value)}))}/></label><button disabled={busy} onClick={()=>void createNode()}>创建节点和配对令牌</button>{pair&&<div className="hint"><p>配对令牌（仅显示本次）：</p><code>{pair.token}</code><p>Node ID: {pair.node_id}</p><p>配对令牌有效期 10 分钟。请勿公开分享。</p></div>}</section>}</div><div>{selected?<section className="card"><h3>{selected.name}</h3><p>{selected.ssh_host}:{selected.ssh_port} · 用户 {selected.login_user}</p><p>Agent：{selected.status} · 初始化：{selected.init_stage}</p><p>当前配置版本：{selected.config_revision}</p><button disabled={busy||selected.status!=="online"} onClick={()=>void preflight(selected)}>执行 SSH 只读环境检查</button><button disabled={busy||selected.status!=="online"} onClick={()=>void inspectPolicy(selected)}>检查 SSH 实际生效配置（Helper）</button><button disabled={busy||selected.status!=="online"||selected.config_revision==="unverified"||!keys.some(k=>k.purpose==="daily")} onClick={()=>void installDaily(selected)}>部署日常公钥（不关闭密码）</button><hr/><h4>本台 VPS 的可信 Root Helper</h4>
+ {pinnedRootProof?<p>已绑定本机证明密钥指纹：<code>{pinnedRootProof.fingerprint}</code>（不可由 Agent 直接更换）</p>:
+ <div className="hint"><p>Root Helper 证明公钥尚未绑定。先在该 VPS 本机手动生成并核对签名公钥，再由 Owner 绑定到本节点。</p>
+ {owner&&<>
+  <label>Root Helper 公钥（base64url 格式）<input value={proofPublicInput} onChange={e=>setProofPublicInput(e.target.value)} placeholder="从 VPS 本机复制 43 字符公钥"/></label>
+  <label>本机输出的 SHA256 指纹（须单独确认）<input value={proofFingerprintInput} onChange={e=>setProofFingerprintInput(e.target.value)} placeholder="SHA256:..."/></label>
+  <button disabled={busy||!proofPublicInput.trim()||!proofFingerprintInput.trim()} onClick={()=>void pinRootProof(selected)}>确认并固定本 VPS 证明公钥</button>
+ </>}
+ </div>}
+ <hr/><h4>SSH 日常密钥登录验证</h4><p>先安装日常公钥，再为当前节点生成一次性挑战。<strong>挑战不代表验证成功</strong>：服务器侧认证证据链已经实现，但尚未完成真实 VPS + Cloudflare Staging 全链路验收。</p>
+ <button disabled={busy||selected.status!=="online"||selected.init_stage!=="WAITING_VERIFICATION"||!pinnedRootProof||(verification?.status==="PENDING")}
+  onClick={()=>void beginVerification(selected)}>生成单节点验证挑战（5分钟）</button>
+ {verification&&<div className="hint">
+  <strong>验证任务：{verification.status}</strong>
+  <p>VPS 本机挑战准备：{verification.prepared_at?"已确认准备完成":"尚未收到成功回执"}</p>
+  <p>对应用户：{verification.login_user}</p>
+  <p>目标公钥：{verification.fingerprint}</p>
+  <p>到期：{new Date(verification.expires_at*1000).toLocaleString()}</p>
+  {verification.token&&verification.status==="PENDING"&&<><p>一次性挑战（只在首次显示）：</p><code>{verification.token}</code></>}
+  <p>{verification.status==="VERIFIED"?"控制端已接受当前节点的 Root Helper 签名认证证明。仍不自动关闭密码登录。":"只有经本机真实公钥认证、可信证明并通过 Cloudflare 验签，才会进入 VERIFIED。不要凭手工点击认定成功。"}</p>
+  {verification.status==="PENDING"&&<button className="secondary" disabled={busy}
+    onClick={()=>void cancelVerification(selected)}>撤销本次挑战</button>}
+ </div>}
+ <ManualOperations key={selected.id} node={selected} owner={owner} enabled={!!me.manual_ssh_actions_enabled}
+    rescueKeyAvailable={keys.some(k=>k.purpose==="rescue")}
+    onOperation={id=>{setOperation(id);setOperationState(null);}}/>{operation&&<div className="hint"><p>任务 ID：{operation}</p><p>实际状态：{operationState?.status||"等待 Agent"} · {operationState?.result_code||""}</p>{operationState?.detail&&<pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{operationState.detail}</pre>}<small>配置检查不能代替可信 SSH 登录验证；安装日常公钥不会关闭密码登录。</small></div>}</section>:<section className="card"><h3>选择一台 VPS</h3><p>操作仅对当前选中的服务器生效。</p></section>}</div></div>}
+ {me&&page==="keys"&&<div className="columns">{(["daily","rescue"] as const).map(kind=>{const k=keys.find(k=>k.purpose===kind);return <section className="card" key={kind}><h3>{kind==="daily"?"🔑 日常公钥":"🛟 救援公钥"}</h3><p>{kind==="daily"?"只在单节点初始化时授权安装。":"默认不对任何 VPS 生效；保存公钥不会下发救援授权。"}</p>{k?<div className="hint"><strong>{k.name} · v{k.version}</strong><p>{k.fingerprint}</p><code>{k.public_key.slice(0,85)}…</code></div>:<p>尚未设置</p>}{owner&&<><label>粘贴 SSH ED25519 公钥<textarea rows={5} value={keyInput[kind]} onChange={e=>setKeyInput(v=>({...v,[kind]:e.target.value}))} placeholder="ssh-ed25519 AAAAC3..."/></label><button disabled={busy||!keyInput[kind].trim()} onClick={()=>void saveKey(kind)}>保存{kind==="daily"?"日常":"救援"}公钥</button></>}</section>})}</div>}
+ {owner&&page==="keys"&&<section className="card"><h3>🔐 绑定第二种登录方式</h3><p>为了防止同邮箱跨身份提供方被自动授予管理员权限，新的 GitHub / Cloudflare Access 身份必须使用已授权 Owner 生成的一次性绑定码完成绑定。</p><button disabled={busy} onClick={()=>void createLink()}>生成 5 分钟身份绑定码</button>{linkToken&&<div className="hint"><code>{linkToken}</code><p>在另一浏览器会话里使用另一身份提供方登录，再粘贴此绑定码。不要分享给其他人。</p></div>}</section>}
+ {me&&page==="audit"&&<section className="card"><h3>最近 100 条审计事件</h3>{audit.map((entry,i)=><div className="audit" key={i}><b>{entry.action}</b><span>{entry.node_id||"平台"} · {entry.result}</span><small>{new Date(entry.created_at*1000).toLocaleString()}</small></div>)}{!audit.length&&<p>暂无审计记录或没有权限。</p>}</section>}
+ </main></div>;
+}
+createRoot(document.getElementById("root")!).render(<App/>);

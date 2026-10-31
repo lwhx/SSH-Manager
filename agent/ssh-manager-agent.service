@@ -1,0 +1,24 @@
+[Unit]
+Description=SSH Manager Agent (unprivileged outbound transport)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ssh-manager
+Group=ssh-manager
+ExecStart=/usr/local/bin/ssh-manager-agent -mode run -config /etc/ssh-manager/agent.json
+Restart=on-failure
+RestartSec=10
+StateDirectory=ssh-manager-agent
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/ssh-manager
+
+[Install]
+WantedBy=multi-user.target

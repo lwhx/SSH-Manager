@@ -1,0 +1,31 @@
+[Unit]
+Description=SSH Manager Local Root Helper (only scoped signed SSH actions)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=ssh-manager
+ExecStart=/usr/local/libexec/ssh-manager-helper
+RuntimeDirectory=ssh-manager ssh-manager-proof
+RuntimeDirectoryMode=0711
+StateDirectory=ssh-manager-root
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# P4 only writes the specifically managed OpenSSH drop-in under this directory.
+# The rest of /etc stays read-only in the helper namespace.
+ReadWritePaths=/etc/ssh/sshd_config.d
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

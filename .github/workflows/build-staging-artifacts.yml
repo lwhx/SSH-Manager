@@ -1,0 +1,42 @@
+name: Build staging binaries (manual)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'agent/**'
+      - '.github/workflows/build-staging-artifacts.yml'
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.23'}
+      - name: Test on runner before cross-build
+        run: cd agent && go test ./...
+      - name: Build fixed Linux entrypoints
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          GOOS: linux
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p release/linux-$GOARCH
+          cd agent
+          go build -trimpath -ldflags='-s -w' -o ../release/linux-$GOARCH/ssh-manager-agent .
+          go build -trimpath -ldflags='-s -w' -o ../release/linux-$GOARCH/ssh-manager-helper ./cmd/ssh-manager-helper
+          go build -trimpath -ldflags='-s -w' -o ../release/linux-$GOARCH/ssh-manager-prove ./cmd/ssh-manager-prove
+      - name: SHA256 checksums and commit identity
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > release/SOURCE_COMMIT
+          find release/linux-* -type f -print0 | sort -z | xargs -0 sha256sum > release/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-manager-staging-linux-${{ matrix.goarch }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14

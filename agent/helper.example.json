@@ -1,0 +1,15 @@
+{
+  "node_id": "REPLACE_WITH_NODE_UUID",
+  "command_public_key": "REPLACE_WITH_BASE64URL_ED25519_PUBLIC",
+  "allowed_user": "root",
+  "client_address": "192.0.2.10",
+  "local_address": "192.0.2.20",
+  "ssh_port": 22,
+  "snapshot_root": "/var/lib/ssh-manager-root/snapshots/REPLACE_NODE",
+  "enable_daily_install": false,
+  "enable_ssh_proof": false,
+  "enable_password_disable": false,
+  "enable_password_restore": false,
+  "enable_config_rollback": false,
+  "enable_rescue": false
+}

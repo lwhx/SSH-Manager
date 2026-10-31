@@ -1,0 +1,35 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  go-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.23'}
+      - run: cd agent && go test -race ./...
+      - run: cd agent && go vet ./...
+      - run: cd agent && go build ./cmd/ssh-manager-helper
+      - run: cd agent && go build ./cmd/ssh-manager-prove
+      - run: cd agent && sudo -E "$(command -v go)" test -run "TestRootProofSessionSignedAndConsumedOnce|TestRootQuarantine|TestOutboxQuarantine" -count=1 -v ./internal/sshhelper
+  control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run check
+      - run: python3 scripts/test_migrations.py
+      - run: python3 -m unittest discover -s scripts -p test_verified_transition.py
+      - run: python3 -m unittest discover -s scripts -p test_terminal_report_transactions.py
+      - run: python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
+      - run: sudo python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
+      - run: python3 -m unittest discover -s scripts -p test_staging_readiness.py
+      - run: python3 -m unittest discover -s scripts -p test_staging_remote_probe.py
+      - run: npm run test
+      - run: node scripts/test_gateway_workerd.mjs --local-only
+      - run: npm run build:web
