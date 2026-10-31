@@ -39,7 +39,26 @@ Root Helper 出具的签名证明包含可信 SSH 认证时间和观察时间。
 
 ## 五、剩余已知限制 / Staging 阻断项
 
-- 当前测试验证了**操作结果已经写入本地报告队列之后**的断网/重启恢复。若进程恰好在 Root Helper 执行成功、Agent 将结果落盘之前崩溃，仍可能需要通过 Root Helper 的本地操作日志和人工核验解决，不能自动重执行 SSH 修改。
+- **本轮已新增 Root 日志读取恢复**：Helper 收到签名命令后先保存领取记录，执行结束后将准确结果写入 root-only 0600 文件并 fsync，再回复 Agent。Agent 重启可读取已持久化的结果，补发云端回执，不执行第二次 SSH 命令。若 Helper 在修改 SSH 文件后尚未完成结果落盘就崩溃，则只能人工核查。
 - 需要真实 Staging VPS 核验 systemd 用户/组权限、Root 出站队列与 Agent 持久化目录、journald PID 来源，以及 Cloudflare Worker/DO/D1 的事务一致性。
 - 与 SSH 登录证明有关的 `VERIFIED` D1 写入目前是一组原子事务。其他操作状态的后续元数据写入仍应在后续安全审查中逐项核验，不能据此宣称所有 P3 操作完全事务化。
 - P4 关闭密码登录、救援公钥授权与手动回滚仍未开放。禁止自动回滚及跨 VPS 批量更改。
+
+## 六、Root Helper 执行成功与 Agent 保存回执之间的异常恢复
+
+恢复凭据分为三层：root 私有领取记录（只表示操作曾被领取）、root 私有终态结果文件（Root Helper 已执行并 fsync）、Agent 自有操作回执及结算标记。
+
+Root 日志位于 /var/lib/ssh-manager-root/operations：operation UUID 对应的 .json 是领取记录，.result.json 是仅 root 可读取的不可覆盖终态记录，包含节点 ID、动作、UUID 和结果。Agent 的领取记录与终态回执分别存放在 /var/lib/ssh-manager-agent/operations 和 reports，使用所属服务账户独占权限。
+
+Agent 发生重启或本机 IPC 响应丢失后，只通过 SO_PEERCRED 保护的 Root Helper Unix Socket 发出只读 operation.recover 请求；Helper 必须检查当前配置节点、操作 UUID 与动作完全匹配，不能重放过期签名命令，也不能查询跨 VPS 的 Root 结果。
+
+| 状态 | 恢复动作 | 限制 |
+| --- | --- | --- |
+| RECORDED（已有可信终态结果） | Agent 读取原结果、先持久化回执、再上传 Cloudflare，收到确认后写入 .settled 标记 | 不重新修改 SSH |
+| UNCONFIRMED（只有领取记录） | 不推断成功或失败；宽限期后写入 .review，交管理员核查 | 不允许自动重执行 |
+| NOT_FOUND（无 Root 领取记录） | 不推断云端结果；宽限期后写入 .review | 不允许自动重执行 |
+| 权限异常、符号链接或节点/动作不匹配 | 拒绝本地恢复 | 不伪造可信结果 |
+
+仍存在不可自动消除的故障窗口：Root Helper 修改了 authorized_keys，随后在写入最终结果之前崩溃。在这种情况下，领取记录无法证明最终 SSH 状态，必须通过服务商控制台或独立 SSH 会话检查，绝不能自动重试修改、打开密码登录、恢复旧 SSH 配置或标记 VERIFIED。
+
+当前 .review 仅是 Agent 私有目录中的本地人工核查标记，尚无云端 UI 审核操作。真实 VPS 的 SIGKILL、断电、journald 兼容性以及 Cloudflare Staging 全链路仍待验收。

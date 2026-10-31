@@ -146,3 +146,7 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 ## P3.3 断网重试及死信队列
 
 Root Helper 签名证明和 Agent 操作结果分别持久化；只有 Cloudflare 明确返回的不可恢复错误才会进入相应的 root/Agent 私有隔离目录，保留原始证据并避免阻塞下一次验证。网络错误、未知 409 和延迟准备回执均不会自动删除。操作结果落盘后，Agent 重启可仅重发回执，不重执行 SSH 命令。见 [P3.3 断网恢复设计与安全边界](docs/P3_RELIABILITY.md)。真实 VPS + Cloudflare Staging E2E 仍未验收，P4 仍锁定。
+
+### P3.3 Root Helper 的可靠终态恢复
+
+Root Helper 执行签名命令后，先在 root-only 日志中持久化准确终态，再回复 Agent。Agent 崩溃重启仅通过只读 Socket 恢复已有结果并上报云端；只有领取记录但无终态时保留人工核查标记，绝不重执行 SSH 修改。详见 [断网恢复设计](docs/P3_RELIABILITY.md)。
