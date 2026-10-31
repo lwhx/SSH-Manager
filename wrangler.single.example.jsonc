@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ssh-manager",
+  "main": "apps/single-worker/src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./apps/console/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "routes": [
+    {
+      "pattern": "REPLACE_CONTROL_HOSTNAME",
+      "custom_domain": true
+    },
+    {
+      "pattern": "REPLACE_AGENT_HOSTNAME",
+      "custom_domain": true
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ssh-manager",
+      "database_id": "REPLACE_WITH_D1_UUID",
+      "migrations_dir": "packages/db/migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "NODE_SESSIONS",
+        "class_name": "NodeSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "NodeSession"
+      ]
+    }
+  ],
+  "vars": {
+    "CONTROL_HOSTNAME": "REPLACE_CONTROL_HOSTNAME",
+    "AGENT_HOSTNAME": "REPLACE_AGENT_HOSTNAME",
+    "ACCESS_TEAM_DOMAIN": "REPLACE.cloudflareaccess.com",
+    "ACCESS_AUD": "REPLACE_STAGING_ACCESS_APPLICATION_AUD",
+    "BOOTSTRAP_OWNER_EMAIL": "owner@example.com",
+    "COMMAND_PUBLIC_KEY": "REPLACE_WITH_BASE64URL_RAW_ED25519_PUBKEY",
+    "MANUAL_SSH_ACTIONS_ENABLED": "false"
+  }
+}
