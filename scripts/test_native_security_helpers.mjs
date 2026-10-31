@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets} from "./native_security_helpers.mjs";
+import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
+ DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery} from "./native_security_helpers.mjs";
 const columns=["nodes","operations","paired_agents","pairing_tokens","device_nonces","node_keys","verifications","snapshots"];
 const empty=()=>[{success:true,results:[Object.fromEntries(columns.map(k=>[k,0]))]}];
 test("empty D1 identity tables permit one-time signer recovery only with complete verification",()=>{
@@ -34,4 +35,28 @@ test("actual target Worker must match D1, public key and SSH safety lock before 
   const bad=structuredClone(cfg);fn(bad);
   assert.throws(()=>verifyWorkerTargets(bad,requirements));
  }
+});
+
+test("deleted Worker recovery retains unpaired nodes but blocks all active or historical identities",()=>{
+ assert.equal(DELETED_WORKER_RECOVERY_FLAG,"CONFIRM_UNPAIRED_STAGING_WORKER_RECREATE");
+ assert.match(DELETED_WORKER_RECOVERY_SQL,/status!='unpaired'/);
+ assert.match(DELETED_WORKER_RECOVERY_SQL,/FROM node_ssh_proof_keys/);
+ assert.match(DELETED_WORKER_RECOVERY_SQL,/active_pair_tokens/);
+ assert.doesNotMatch(DELETED_WORKER_RECOVERY_SQL,/\bDELETE\b|\bUPDATE\b|\bDROP\b/i);
+ const columns=["total_nodes","non_unpaired_nodes","paired_agents","used_pair_tokens",
+  "active_pair_tokens","device_nonces","operations","node_keys","verifications","snapshots","proof_keys"];
+ const good=()=>[{success:true,results:[Object.fromEntries(columns.map(key=>[key,0]))]}];
+ const unpaired=good();unpaired[0].results[0].total_nodes=3;
+ assert.deepEqual(validateDeletedWorkerStagingQuery(unpaired),{totalNodes:3});
+ for(const key of columns.slice(1)){
+  const bad=good();bad[0].results[0][key]=1;
+  assert.throws(()=>validateDeletedWorkerStagingQuery(bad),new RegExp(key));
+ }
+ for(const key of columns){
+  const missing=good();delete missing[0].results[0][key];
+  assert.throws(()=>validateDeletedWorkerStagingQuery(missing));
+ }
+ assert.throws(()=>validateDeletedWorkerStagingQuery([{success:false,results:[]}]));
+ const negative=good();negative[0].results[0].total_nodes=-1;
+ assert.throws(()=>validateDeletedWorkerStagingQuery(negative));
 });

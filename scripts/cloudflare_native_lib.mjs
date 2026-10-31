@@ -111,18 +111,24 @@ export function newCloudflareBootstrap(env){
 // Bootstrap is only safe when the named D1 does not yet exist and either no
 // Worker exists or Cloudflare Builds created an EMPTY placeholder Worker.
 // Never overwrite a Worker carrying secrets, D1 or Durable Object bindings.
-export function classifyWorkerForBootstrap(settings,d1list){
+export function classifyWorkerForBootstrap(settings,d1list,{allowDeletedWorkerRecovery=false}={}){
  const existingDatabase=findStagingDatabase(d1list,"ssh-manager-staging");
  if(settings===null){
-  if(existingDatabase)throw Error(
-   "Staging D1 exists without a verified Worker. Manual recovery required; no key rotation.");
+  if(existingDatabase){
+   if(allowDeletedWorkerRecovery)return "deleted-worker-recovery";
+   throw Error("Staging D1 exists without a verified Worker. Manual recovery required; no key rotation.");
+  }
   return "new";
  }
  const bindings=settings?.bindings;
  if(!Array.isArray(bindings))throw Error("Unexpected existing Worker metadata");
  if(bindings.some(x=>x?.name==="COMMAND_PUBLIC_KEY"))
   return "existing";
- if(existingDatabase)throw Error("D1 already exists without pinned Worker settings");
+ if(existingDatabase){
+  if(allowDeletedWorkerRecovery&&bindings.every(x=>x?.type==="assets"))
+   return "deleted-worker-recovery";
+  throw Error("D1 already exists without pinned Worker settings");
+ }
  if(bindings.some(x=>x?.type!=="assets"))
   throw Error("A nonempty Worker already uses this name; refusing to overwrite its bindings");
  return "new";

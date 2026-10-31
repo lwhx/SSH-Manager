@@ -17,7 +17,8 @@ import {
  extractExistingStagingWorker,extractWhoamiAccount,requireCloudflareSettingsResponse,
  newCloudflareBootstrap,classifyWorkerForBootstrap,parseWranglerAuthToken
 } from "./cloudflare_native_lib.mjs";
-import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets} from "./native_security_helpers.mjs";
+import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
+ DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery} from "./native_security_helpers.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
@@ -155,23 +156,71 @@ async function initialize(template,id){
  }
  console.log("INITIAL DEPLOY OK. Original private signer stored in Cloudflare only.");
 }
-async function repairOrphanedSigner(template,remote,dbs,id){
- if(process.env.SSH_MANAGER_RECOVER_EMPTY_STAGING!==SIGNER_RECOVERY_FLAG){
-  throw Error("Connected Worker has no COMMAND_PRIVATE_KEY. Set the explicit one-time Staging recovery variable only after confirming the database is empty.");
+// Read-only gate used before/after any deleted-Worker signer replacement.
+// A previous unpaired node may be retained; an activated Agent/SSH history
+// may never be silently rekeyed.
+function assertUnpairedStagingD1(){
+ const output=wrangler(["d1","execute","DB","--remote","--json",
+  "--config",CONFIG,"--command",DELETED_WORKER_RECOVERY_SQL],{capture:true});
+ let payload;
+ try{payload=JSON.parse(output);}catch{
+  throw Error("Deleted-Worker recovery cannot parse D1 safety check");
  }
+ return validateDeletedWorkerStagingQuery(payload);
+}
+async function recreateDeletedWorker(template,dbs,id){
+ if(process.env.SSH_MANAGER_RECOVER_DELETED_WORKER!==DELETED_WORKER_RECOVERY_FLAG)
+  throw Error("Deleted-Worker recovery requires the exact one-time opt-in");
+ const params=newCloudflareBootstrap(process.env);
+ const original=findStagingDatabase(dbs,DB);
+ if(!original)throw Error("Original Staging D1 was not found; no resource created");
+ const signer=generateCommandSigner();
+ const cfg=buildSingleConfig(template,{...params,dbId:original.id,publicKey:signer.publicKey});
+ cfg.name=NAME;
+ writeConfig(cfg);
+ // Do NOT create/delete D1 or clean up old data. Only a provably inactive
+ // Staging identity permits rotating the lost Worker signing key.
+ const before=assertUnpairedStagingD1();
+ console.log("[Staging] Recreating deleted Worker; reusing existing D1 with "+before.totalNodes+" unpaired nodes.");
+ migrate();
+ deploy();
+ const deployed=await settings(id);
+ verifyWorkerTargets(deployed,{publicKey:signer.publicKey,databaseId:original.id});
+ // Recheck after publishing the public key to exclude a race where a device
+ // paired between the first check and the matching secret upload.
+ assertUnpairedStagingD1();
+ wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG,"--name",NAME],{
+  input:signer.privateKeyPkcs8Base64+"\n"
+ });
+ originalSecretExists();
+ console.log("DELETED WORKER RECOVERY OK. Existing Staging D1 retained.");
+ console.log("Remove SSH_MANAGER_RECOVER_DELETED_WORKER from Cloudflare Build variables NOW.");
+}
+
+async function repairOrphanedSigner(template,remote,dbs,id){
+ const emptyRecovery=process.env.SSH_MANAGER_RECOVER_EMPTY_STAGING===SIGNER_RECOVERY_FLAG;
+ const deletedRecovery=process.env.SSH_MANAGER_RECOVER_DELETED_WORKER===DELETED_WORKER_RECOVERY_FLAG;
+ if(!emptyRecovery&&!deletedRecovery)
+  throw Error("Connected Worker has no signing secret. Recovery requires explicit one-time authorization.");
+ if(emptyRecovery&&deletedRecovery)
+  throw Error("Select exactly one recovery mode, not both.");
  const cfg=extractExistingStagingWorker(template,remote,dbs,{allowMissingSigner:true});
  cfg.name=NAME;
  writeConfig(cfg);
  verifyWorkerTargets(remote,{
   publicKey:cfg.vars.COMMAND_PUBLIC_KEY,databaseId:cfg.d1_databases[0].database_id
  });
- const query=wrangler(["d1","execute","DB","--remote","--json",
-  "--config",CONFIG,"--command",EMPTY_STAGING_SQL],{capture:true});
- let data;
- try{data=JSON.parse(query);}catch{
-  throw Error("Remote D1 recovery check returned invalid JSON; refusing signer reset");
+ if(deletedRecovery){
+  assertUnpairedStagingD1();
+ }else{
+  const query=wrangler(["d1","execute","DB","--remote","--json",
+   "--config",CONFIG,"--command",EMPTY_STAGING_SQL],{capture:true});
+  let data;
+  try{data=JSON.parse(query);}catch{
+   throw Error("Remote D1 recovery check returned invalid JSON; refusing signer reset");
+  }
+  validateEmptyStagingQuery(data);
  }
- validateEmptyStagingQuery(data);
  const signer=generateCommandSigner();
  cfg.vars.COMMAND_PUBLIC_KEY=signer.publicKey;
  writeFileSync(CONFIG,JSON.stringify(cfg,null,2)+"\n",{mode:0o600});
@@ -179,11 +228,12 @@ async function repairOrphanedSigner(template,remote,dbs,id){
  deploy();
  const deployed=await settings(id);
  verifyWorkerTargets(deployed,{publicKey:signer.publicKey,databaseId:cfg.d1_databases[0].database_id});
+ if(deletedRecovery)assertUnpairedStagingD1();
  wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG,"--name",NAME],{
   input:signer.privateKeyPkcs8Base64+"\n"
  });
  originalSecretExists();
- console.log("RECOVERY OK on the actual connected Worker. Remove SSH_MANAGER_RECOVER_EMPTY_STAGING from Cloudflare Build variables now.");
+ console.log(deletedRecovery?"DELETED WORKER RECOVERY OK. Remove SSH_MANAGER_RECOVER_DELETED_WORKER now.":"RECOVERY OK on the actual connected Worker. Remove SSH_MANAGER_RECOVER_EMPTY_STAGING now.");
 }
 async function update(template,remote,dbs,id){
  const missingSecret=!remote?.bindings?.some(x=>x?.name==="COMMAND_PRIVATE_KEY");
@@ -213,11 +263,19 @@ async function main(){
  const id=accountId();
  const remote=await settings(id);
  const dbs=databaseList();
- const mode=classifyWorkerForBootstrap(remote,dbs);
+ const deletedValue=process.env.SSH_MANAGER_RECOVER_DELETED_WORKER;
+ if(deletedValue&&deletedValue!==DELETED_WORKER_RECOVERY_FLAG)
+  throw Error("Invalid deleted-Worker recovery flag; refusing deployment");
+ const allowDeleted=deletedValue===DELETED_WORKER_RECOVERY_FLAG;
+ const mode=classifyWorkerForBootstrap(remote,dbs,{allowDeletedWorkerRecovery:allowDeleted});
+ if(allowDeleted&&mode!=="deleted-worker-recovery"&&
+  remote?.bindings?.some(x=>x?.name==="COMMAND_PRIVATE_KEY"))
+  throw Error("Recovered Worker already has a signer. Remove SSH_MANAGER_RECOVER_DELETED_WORKER.");
  const template=JSON.parse(readFileSync(TEMPLATE,"utf8"));
  console.log("Cloudflare single-Worker deployment mode: "+mode);
  try{
   if(mode==="new")await initialize(template,id);
+  else if(mode==="deleted-worker-recovery")await recreateDeletedWorker(template,dbs,id);
   else await update(template,remote,dbs,id);
  }finally{
   rmSync(CONFIG,{force:true}); // Non-secret temporary configuration.

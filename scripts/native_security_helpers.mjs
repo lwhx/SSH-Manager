@@ -49,3 +49,38 @@ export function verifyWorkerTargets(settings,{publicKey,databaseId,requireSigner
   }
   return true;
 }
+
+
+// Recreate a DELETED Staging Worker while retaining its existing D1.
+// Only unpaired WAITING_PAIR nodes and owner/audit metadata may remain.
+// Never permit recovery with device credentials, verified SSH or operations.
+export const DELETED_WORKER_RECOVERY_FLAG="CONFIRM_UNPAIRED_STAGING_WORKER_RECREATE";
+export const DELETED_WORKER_RECOVERY_SQL=[
+ "SELECT",
+ "(SELECT COUNT(*) FROM nodes) AS total_nodes,",
+ "(SELECT COUNT(*) FROM nodes WHERE status!='unpaired' OR init_stage!='WAITING_PAIR') AS non_unpaired_nodes,",
+ "(SELECT COUNT(*) FROM agent_credentials) AS paired_agents,",
+ "(SELECT COUNT(*) FROM pairing_tokens WHERE used_at IS NOT NULL) AS used_pair_tokens,",
+ "(SELECT COUNT(*) FROM pairing_tokens WHERE used_at IS NULL AND expires_at>unixepoch()) AS active_pair_tokens,",
+ "(SELECT COUNT(*) FROM device_nonces) AS device_nonces,",
+ "(SELECT COUNT(*) FROM operations) AS operations,",
+ "(SELECT COUNT(*) FROM node_keys) AS node_keys,",
+ "(SELECT COUNT(*) FROM ssh_verifications) AS verifications,",
+ "(SELECT COUNT(*) FROM ssh_config_snapshots) AS snapshots,",
+ "(SELECT COUNT(*) FROM node_ssh_proof_keys) AS proof_keys"
+].join(" ");
+export function validateDeletedWorkerStagingQuery(payload){
+ const one=Array.isArray(payload)&&payload.length===1&&payload[0];
+ const row=one?.success===true&&Array.isArray(one.results)&&one.results.length===1?one.results[0]:null;
+ if(!row||typeof row!=="object")throw Error("Deleted-Worker D1 verification failed or returned incomplete results");
+ if(!Number.isSafeInteger(row.total_nodes)||row.total_nodes<0)
+  throw Error("Deleted-Worker D1 node count cannot be verified");
+ const zero=["non_unpaired_nodes","paired_agents","used_pair_tokens",
+  "active_pair_tokens","device_nonces","operations","node_keys",
+  "verifications","snapshots","proof_keys"];
+ for(const key of zero){
+  if(!Object.hasOwn(row,key)||!Number.isSafeInteger(row[key])||row[key]!==0)
+   throw Error("Deleted-Worker recovery blocked by nonempty/unknown "+key);
+ }
+ return {totalNodes:row.total_nodes};
+}
