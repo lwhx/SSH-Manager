@@ -132,3 +132,59 @@ func TestPolicyConfigurationChecks(t *testing.T){
  h.Config.SnapshotRoot="/"
  if err:=h.Config.Validate();err==nil{t.Fatal("unsafe snapshot root accepted")}
 }
+
+
+func TestSignedVerificationPrepareCannotVerifySSHOrChangePassword(t *testing.T){
+ signer,pub:=makeSigner(t)
+ h,calls:=newHandler(t,pub)
+ prepared:=preparedFixture()
+ h.Config.EnableDailyInstall=false
+ h.Challenges=&ChallengeStore{Directory:filepath.Join(t.TempDir(),"challenges")}
+ h.Inspect=func(context.Context,Config)(sshprobe.Effective,error){
+  return sshprobe.Effective{
+   PublicKeyAuthentication:true,
+   AuthorizedKeysFile:[]string{".ssh/authorized_keys"},
+   PermitRootLogin:"prohibit-password",
+   AuthenticationMethods:"any",Revision:prepared.ConfigRevision,
+  },nil
+ }
+ payload,_:=json.Marshal(prepared)
+ c:=Command{
+  V:1,ID:"60000000-0000-4000-8000-000000000001",NodeID:testNode,
+  Action:"ssh.verification.prepare",Actor:"owner",IssuedAt:990,ExpiresAt:1030,
+  ExpectedRevision:prepared.ConfigRevision,Payload:payload,
+ }
+ result:=h.Execute(context.Background(),signed(t,signer,c))
+ if !result.OK||result.Code!="VERIFICATION_PREPARED"{
+  t.Fatalf("failed to prepare signed challenge: %+v",result)
+ }
+ if *calls!=0{t.Fatal("verification preparation wrote SSH keys")}
+ saved,err:=h.Challenges.Read(prepared.VerificationID)
+ if err!=nil||saved.NonceHash!=prepared.NonceHash{t.Fatalf("missing prepared challenge: %v",err)}
+ if repeated:=h.Execute(context.Background(),signed(t,signer,c));repeated.OK{
+  t.Fatal("same signed verification preparation executed twice")
+ }
+}
+func TestRejectsMismatchedSignedPreparation(t *testing.T){
+ signer,pub:=makeSigner(t)
+ h,_:=newHandler(t,pub)
+ prepared:=preparedFixture()
+ h.Config.EnableDailyInstall=false
+ h.Challenges=&ChallengeStore{Directory:filepath.Join(t.TempDir(),"challenges")}
+ h.Inspect=func(context.Context,Config)(sshprobe.Effective,error){
+  return sshprobe.Effective{
+   PublicKeyAuthentication:true,
+   AuthorizedKeysFile:[]string{".ssh/authorized_keys"},
+   PermitRootLogin:"prohibit-password",AuthenticationMethods:"any",Revision:prepared.ConfigRevision,
+  },nil
+ }
+ prepared.LoginUser="other"
+ payload,_:=json.Marshal(prepared)
+ c:=Command{
+  V:1,ID:"60000000-0000-4000-8000-000000000002",NodeID:testNode,
+  Action:"ssh.verification.prepare",Actor:"owner",IssuedAt:990,ExpiresAt:1030,
+  ExpectedRevision:prepared.ConfigRevision,Payload:payload,
+ }
+ result:=h.Execute(context.Background(),signed(t,signer,c))
+ if result.OK{t.Fatal("accepted root challenge for the wrong Linux user")}
+}
