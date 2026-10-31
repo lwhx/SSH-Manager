@@ -9,14 +9,14 @@ describe("node settings",()=>{
   const html=renderToStaticMarkup(<NodeSettings node={node} canEdit onSave={async()=>{}}/>);
   expect(html).toContain("节点名称");
   expect(html).toContain("分组");
-  expect(html).toMatch(/name="ssh_host"[^>]*disabled/);
-  expect(html).toMatch(/name="ssh_port"[^>]*disabled/);
-  expect(html).toMatch(/name="login_user"[^>]*disabled/);
+  expect(html).toMatch(/<input(?=[^>]*name="ssh_host")(?=[^>]*disabled="")[^>]*>/);
+  expect(html).toMatch(/<input(?=[^>]*name="ssh_port")(?=[^>]*disabled="")[^>]*>/);
+  expect(html).toMatch(/<input(?=[^>]*name="login_user")(?=[^>]*disabled="")[^>]*>/);
  });
  it("permits editing unpaired connection properties only",()=>{
   const html=renderToStaticMarkup(<NodeSettings node={{...node,status:"unpaired"}} canEdit onSave={async()=>{}}/>);
-  expect(html).toMatch(/name="ssh_host"[^>]*value="192.0.2.1"/);
-  expect(html).not.toMatch(/name="ssh_host"[^>]*disabled/);
+  expect(html).toMatch(/<input(?=[^>]*name="ssh_host")(?=[^>]*value="192.0.2.1")[^>]*>/);
+  expect(html).not.toMatch(/<input(?=[^>]*name="ssh_host")(?=[^>]*disabled="")[^>]*>/);
  });
  it("does not render submit actions for a viewer",()=>{
   const html=renderToStaticMarkup(<NodeSettings node={node} canEdit={false} onSave={async()=>{}}/>);
