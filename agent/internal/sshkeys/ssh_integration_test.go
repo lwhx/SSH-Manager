@@ -23,7 +23,9 @@ import (
 func TestLocalSSHDIntegration(t *testing.T){
  if os.Geteuid()!=0{t.Fatal("SSH integration must run as root on an isolated CI runner")}
  if _,err:=os.Stat("/usr/sbin/sshd");err!=nil{t.Fatal("openssh-server required: ",err)}
- root:=t.TempDir()
+ root,err:=os.MkdirTemp("/tmp","sm-ssh-ci-")
+ if err!=nil{t.Fatal(err)}
+ t.Cleanup(func(){_ = os.RemoveAll(root)})
  if err:=os.Chmod(root,0755);err!=nil{t.Fatal(err)}
  random:=make([]byte,5)
  if _,err:=rand.Read(random);err!=nil{t.Fatal(err)}
