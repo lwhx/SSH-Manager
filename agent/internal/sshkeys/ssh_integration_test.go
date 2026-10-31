@@ -88,13 +88,21 @@ func TestLocalSSHDIntegration(t *testing.T){
   time.Sleep(100*time.Millisecond)
  }
  if !ready{t.Fatalf("isolated sshd did not start: %s",serverLog.String())}
+ // The test itself verifies host identity. Never disable SSH host-key checks.
+ hostPublic,err:=os.ReadFile(hostKey+".pub")
+ if err!=nil{t.Fatal(err)}
+ hostFields:=strings.Fields(string(hostPublic))
+ if len(hostFields)<2{t.Fatal("invalid generated SSH host public key")}
+ knownHosts:=filepath.Join(root,"known_hosts")
+ hostLine:=fmt.Sprintf("[127.0.0.1]:%d %s %s\n",port,hostFields[0],hostFields[1])
+ if err:=os.WriteFile(knownHosts,[]byte(hostLine),0600);err!=nil{t.Fatal(err)}
  sshAttempt:=func(keyfile string)(string,error){
   args:=[]string{"-T","-p",strconv.Itoa(port),
    "-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","IdentityAgent=none",
    "-o","PreferredAuthentications=publickey","-o","PasswordAuthentication=no",
    "-o","KbdInteractiveAuthentication=no","-o","NumberOfPasswordPrompts=0",
    "-o","ControlMaster=no","-o","ControlPath=none","-o","ConnectTimeout=2",
-   "-o","StrictHostKeyChecking=no","-o","UserKnownHostsFile=/dev/null",
+   "-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+knownHosts,
    "-i",keyfile,username+"@127.0.0.1","printf ssh-login-ok"}
   b,e:=exec.Command("ssh",args...).CombinedOutput()
   return string(b),e
