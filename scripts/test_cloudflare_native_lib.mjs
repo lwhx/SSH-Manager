@@ -112,6 +112,11 @@ test("bootstrap only with empty Worker and no existing Staging D1",()=>{
  assert.equal(classifyWorkerForBootstrap({bindings:bindings()},list),"existing");
  assert.throws(()=>classifyWorkerForBootstrap(null,list));
  assert.throws(()=>classifyWorkerForBootstrap({bindings:[]},list));
+ assert.equal(classifyWorkerForBootstrap(null,list,{allowDeletedWorkerRecovery:true}),"deleted-worker-recovery");
+ assert.equal(classifyWorkerForBootstrap({bindings:[]},list,{allowDeletedWorkerRecovery:true}),"deleted-worker-recovery");
+ assert.equal(classifyWorkerForBootstrap({bindings:[{type:"assets",name:"ASSETS"}]},list,{allowDeletedWorkerRecovery:true}),"deleted-worker-recovery");
+ assert.equal(classifyWorkerForBootstrap({bindings:bindings()},list,{allowDeletedWorkerRecovery:true}),"existing");
+ assert.throws(()=>classifyWorkerForBootstrap({bindings:[{name:"DB",type:"d1",database_id:UUID}]},list,{allowDeletedWorkerRecovery:true}));
  assert.throws(()=>classifyWorkerForBootstrap({bindings:[{name:"COMMAND_PRIVATE_KEY",type:"secret_text"}]},[]));
  assert.throws(()=>classifyWorkerForBootstrap({bindings:[{name:"DB",type:"d1",database_id:UUID}]},[]));
 });
