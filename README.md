@@ -16,29 +16,19 @@
 
 > 项目尚未完成 Cloudflare Staging + 真实 VPS P3.4 T01–T11 联调。当前代码可部署测试环境，不可视为生产 SSH 管理已验收。
 
-## 快捷部署（独立 Staging）
+## Cloudflare 3 步部署（推荐，不需要本地命令）
 
-先在 Cloudflare Zero Trust 为 Control 域名配置 GitHub/Cloudflare 双身份、MFA 和 Owner Allow 策略，获取 Team Domain 与 Access Application AUD。准备两个当前 Cloudflare 账户管理的自定义域名。
+1. Cloudflare Zero Trust → 为 ssh-staging.你的主域名创建 **Control 专属** Access Application，配置 GitHub / Cloudflare 登录、管理员 Allow/MFA，取得 Team Domain 和 Application AUD。
+2. Cloudflare Workers & Pages → GitHub，选择 lwhx/SSH-Manager、main，Worker 名为 ssh-manager-staging。**Build command 留空、Deploy command 填 npm run cf:deploy、Preview command 填 npm run cf:preview:skip。**
+3. 添加四个 Build variables：SSH_MANAGER_BASE_DOMAIN（如 whks.de）、SSH_MANAGER_ACCESS_TEAM_DOMAIN、SSH_MANAGER_ACCESS_AUD、SSH_MANAGER_OWNER_EMAIL；点击 Save and Deploy。
 
-~~~powershell
-git clone https://github.com/lwhx/SSH-Manager.git
-cd SSH-Manager
-npm install
-npx wrangler login
-npm run cf:quick
-~~~
+第一次构建自动创建 Staging D1、命令签名密钥、一个 Worker 和两个 Custom Domains（ssh-staging / agent-staging），以后 GitHub main 自动更新并保留数据与密钥。若默认 Build API Token 缺乏 D1 权限，需要在 Cloudflare Builds 选择包含 Workers Scripts/Routes 与 D1 Read/Edit 的受限 API Token。
 
-首次按提示填写两个域名、Team Domain、AUD、Owner 邮箱并确认 SINGLE-STAGING。脚本配置一个 Staging D1、一套命令签名密钥、一个 Worker 的本地 Durable Object，上传 Secret，自动构建中文界面。后续在同一目录执行：
+不需要在 Windows 安装 Wrangler，也不需要手动填 D1 UUID 或 Ed25519 公钥。**Access 只能保护管理域名，不得对 Worker 整体开启 Access。**
 
-~~~powershell
-git pull --ff-only
-npm install
-npm run cf:quick
-~~~
+[Cloudflare 3 步快捷部署](docs/CLOUDFLARE_QUICK_DEPLOY.md) · [完整部署须知](docs/DEPLOYMENT.md) · [GitHub 自动部署](docs/GITHUB_CLOUDFLARE_SINGLE_DEPLOY.md) · [旧版迁移](docs/MIGRATE_DUAL_TO_SINGLE.md)
 
-不会自动重新生成密钥、自动开启救援或修改 VPS。
-
-[单 Worker 快捷部署](docs/CLOUDFLARE_QUICK_DEPLOY.md) · [完整部署须知](docs/DEPLOYMENT.md) · [双 Worker 迁移指南](docs/MIGRATE_DUAL_TO_SINGLE.md) · [GitHub 自动部署（单 Worker）](docs/GITHUB_CLOUDFLARE_SINGLE_DEPLOY.md)
+仍支持本地 PowerShell 备用方案：npm install → npx wrangler login → npm run cf:quick。
 
 ## 核心安全约束
 

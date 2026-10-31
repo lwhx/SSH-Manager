@@ -35,9 +35,11 @@ Cloudflare Worker、VPS Agent、Root Helper 和 prove CLI 必须来自同一个 
 
 Worker 共用一个 D1（ssh-manager-staging）和一个本地 NodeSession Durable Object；不再部署两个 Workers，也不使用跨 Worker Service binding。
 
-    npm install
-    npx wrangler login
-    npm run cf:quick
+Cloudflare Workers & Pages → GitHub → lwhx/SSH-Manager (main)，Worker 名 ssh-manager-staging。
+
+Build command 留空，Deploy command 设为 npm run cf:deploy，Preview command 设为 npm run cf:preview:skip。
+
+只配置 SSH_MANAGER_BASE_DOMAIN、SSH_MANAGER_ACCESS_TEAM_DOMAIN、SSH_MANAGER_ACCESS_AUD、SSH_MANAGER_OWNER_EMAIL 四个 Build Variables，然后 Save and Deploy。Cloudflare 默认 Build API Token 若缺少 D1 权限，请选用限定账户且包含 D1 Read/Edit、Workers Scripts/Routes 权限的 Token。
 
 首次填写 Control/Agent 域名、Access Team Domain/AUD/Owner，确认 SINGLE-STAGING。脚本创建/复用 Staging D1，运行迁移，生成签名密钥（私钥仅送入 Worker Secret）并部署一个 Worker。
 
