@@ -15,7 +15,7 @@ export default function VerificationPanel({
   <p>对应用户：{verification.login_user}</p>
   <p>目标公钥：{verification.fingerprint}</p>
   <p>到期：{new Date(verification.expires_at*1000).toLocaleString()}</p>
-  {verification.token&&verification.status==="PENDING"&&<><p>一次性挑战（只在首次显示）：</p><code>{verification.token}</code></>}
+  {canManage&&verification.token&&verification.status==="PENDING"&&<><p>一次性挑战（只在首次显示）：</p><code>{verification.token}</code></>}
   <p>{verification.status==="VERIFIED"?
    "控制端已接受当前节点的可信 Root Helper 签名认证证明。仍不自动关闭密码登录。":
    "只有经本机真实公钥认证、可信证明并通过 Cloudflare 验签，才会进入 VERIFIED。不要凭手工点击认定成功。"}
