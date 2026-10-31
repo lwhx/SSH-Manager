@@ -57,11 +57,7 @@ func (a *Agent) request(ctx context.Context,path string,body any)([]byte,error){
  now:=time.Now().Unix()
  nonce:=make([]byte,24);if _,err=rand.Read(nonce);err!=nil{return nil,err}
  digest:=sha256.Sum256(raw)
- message:=fmt.Sprintf("POST
-%s
-%d
-%s
-%s",path,now,encode(nonce),hex.EncodeToString(digest[:]))
+ message:=fmt.Sprintf("POST\n%s\n%d\n%s\n%s",path,now,encode(nonce),hex.EncodeToString(digest[:]))
  req.Header.Set("Content-Type","application/json")
  req.Header.Set("X-Node-Id",a.config.NodeID)
  req.Header.Set("X-Device-Timestamp",fmt.Sprint(now))
