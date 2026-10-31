@@ -5,3 +5,12 @@ select{display:block;width:100%;margin-top:6px;border:1px solid #354c6c;border-r
 .danger-panel button{margin:6px 8px 6px 0}
 .danger-panel .warning{color:#f9c8b8}
 .safety-locked{color:#f7ce86}
+
+.installer-panel{border:1px solid #3c6a99;background:#11253d;border-radius:12px;padding:16px;margin:18px 0}
+.installer-title{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.installer-title h4{margin:0}.installer-title button{padding:7px 10px}
+.installer-panel p{font-size:13px}.installer-panel strong{display:block;margin:12px 0}
+.installer-panel a{color:#aaccff}
+.install-code{font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;background:#091521;border:1px solid #29465f;padding:12px;border-radius:8px;user-select:text}
+.token-surface{padding:12px;border:1px solid #486b87;border-radius:8px;margin:10px 0;background:#16283d}
+.token-surface code{display:block;overflow-wrap:anywhere;word-break:break-all;padding:10px;margin:7px 0;background:#0b1929;border-radius:6px}

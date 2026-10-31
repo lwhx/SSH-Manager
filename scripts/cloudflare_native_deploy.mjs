@@ -104,7 +104,15 @@ function originalSecretExists(){
 }
 function buildAssets(){
  const npm=process.platform==="win32"?"npm.cmd":"npm";
- const res=spawnSync(npm,["run","build:web"],{cwd:ROOT,env:process.env,stdio:"inherit"});
+ const head=spawnSync("git",["rev-parse","HEAD"],{
+  cwd:ROOT,encoding:"utf8",stdio:["ignore","pipe","ignore"]
+ });
+ const gitSha=head.status===0?String(head.stdout||"").trim().toLowerCase():"";
+ const pinned=/^[a-f0-9]{40}$/.test(gitSha)?gitSha:"";
+ if(!pinned)console.warn("Cannot determine source Git SHA; the VPS installer wizard will remain disabled.");
+ const res=spawnSync(npm,["run","build:web"],{
+  cwd:ROOT,env:{...process.env,VITE_SSH_MANAGER_COMMIT:pinned},stdio:"inherit"
+ });
  if(res.error||res.status!==0)throw Error("Control panel build failed");
  if(!existsSync(join(ROOT,"apps","console","dist","index.html")))
   throw Error("Built React assets are missing");
