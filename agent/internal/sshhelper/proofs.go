@@ -89,6 +89,7 @@ func(o *Outbox)Ack(proofID string)error{
 func(h *Handler)ProveSession(ctx context.Context,peerPID,peerUID int,request ProofRequest)ProofResult{
  h.defaults()
  fail:=func(code string)ProofResult{return ProofResult{Code:code}}
+ if err:=h.Config.Validate();err!=nil{return fail("INVALID_ROOT_HELPER_CONFIGURATION")}
  if h.EUID()!=0||!h.Config.EnableSSHProof||h.Challenges==nil||
   h.Outbox==nil||len(h.ProofSigningKey)!=ed25519.PrivateKeySize{
   return fail("PROOF_FEATURE_DISABLED")

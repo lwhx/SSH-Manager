@@ -42,7 +42,10 @@ func TestRootProofSessionSignedAndConsumedOnce(t *testing.T){
  pub,priv,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
  h:=&Handler{
   Config:Config{NodeID:"30000000-0000-4000-8000-000000000001",
-    AllowedUser:"root",EnableSSHProof:true},
+    CommandPublicKey:base64.RawURLEncoding.EncodeToString(pub),
+    AllowedUser:"root",EnableSSHProof:true,
+    ClientAddress:"203.0.113.9",LocalAddress:"192.0.2.20",
+    SSHPort:22,SnapshotRoot:filepath.Join(base,"snapshots")},
   ProofSigningKey:priv,Challenges:ch,Outbox:out,
   Clock:time.Now,EUID:os.Geteuid,
   Lookup:func(string)(*user.User,error){return &user.User{Username:"root",Uid:"0",Gid:"0"},nil},
