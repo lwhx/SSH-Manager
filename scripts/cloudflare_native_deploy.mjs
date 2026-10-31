@@ -147,6 +147,36 @@ async function initialize(template,id){
  }
  console.log("INITIAL DEPLOY OK. Original private signer stored in Cloudflare only.");
 }
+async function repairOrphanedSigner(template,remote,dbs,id){
+ if(process.env.SSH_MANAGER_RECOVER_EMPTY_STAGING!==SIGNER_RECOVERY_FLAG){
+  throw Error("Connected Worker has no COMMAND_PRIVATE_KEY. Set the explicit one-time Staging recovery variable only after confirming the database is empty.");
+ }
+ const cfg=extractExistingStagingWorker(template,remote,dbs,{allowMissingSigner:true});
+ cfg.name=NAME;
+ writeConfig(cfg);
+ verifyWorkerTargets(remote,{
+  publicKey:cfg.vars.COMMAND_PUBLIC_KEY,databaseId:cfg.d1_databases[0].database_id
+ });
+ const query=wrangler(["d1","execute","DB","--remote","--json",
+  "--config",CONFIG,"--command",EMPTY_STAGING_SQL],{capture:true});
+ let data;
+ try{data=JSON.parse(query);}catch{
+  throw Error("Remote D1 recovery check returned invalid JSON; refusing signer reset");
+ }
+ validateEmptyStagingQuery(data);
+ const signer=generateCommandSigner();
+ cfg.vars.COMMAND_PUBLIC_KEY=signer.publicKey;
+ writeFileSync(CONFIG,JSON.stringify(cfg,null,2)+"\n",{mode:0o600});
+ migrate();
+ deploy();
+ const deployed=await settings(id);
+ verifyWorkerTargets(deployed,{publicKey:signer.publicKey,databaseId:cfg.d1_databases[0].database_id});
+ wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG,"--name",NAME],{
+  input:signer.privateKeyPkcs8Base64+"\n"
+ });
+ originalSecretExists();
+ console.log("RECOVERY OK on the actual connected Worker. Remove SSH_MANAGER_RECOVER_EMPTY_STAGING from Cloudflare Build variables now.");
+}
 async function update(template,remote,dbs,id){
  const missingSecret=!remote?.bindings?.some(x=>x?.name==="COMMAND_PRIVATE_KEY");
  if(missingSecret){
