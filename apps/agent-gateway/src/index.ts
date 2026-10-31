@@ -94,6 +94,22 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
         b.result_code==="POLICY_INSPECTED",
         "INVALID_POLICY_REPORT",409);
     }
+    if(status==="SUCCEEDED"&&op.action==="ssh.verification.prepare"){
+      const c=JSON.parse(op.command_json);
+      must(b.result_code==="VERIFICATION_PREPARED"&&b.detail&&plain(b.detail)&&
+        b.detail.verification_id===c.payload.verification_id&&
+        b.detail.verified_login===false,"INVALID_PREPARATION_REPORT",409);
+      const current=await env.DB.prepare(
+        "SELECT id,config_revision,login_user,key_fingerprint,public_key_id FROM ssh_verifications "+
+        "WHERE id=? AND node_id=? AND status='PENDING' AND expires_at>?"
+      ).bind(c.payload.verification_id,id,now()).first<{
+        id:string;config_revision:string;login_user:string;key_fingerprint:string;public_key_id:string;
+      }>();
+      must(current&&current.config_revision===c.payload.config_revision&&
+        current.login_user===c.payload.login_user&&
+        current.key_fingerprint===c.payload.fingerprint&&
+        current.public_key_id===c.payload.key_id,"VERIFICATION_PREPARATION_STALE",409);
+    }
     // Validate helper proof BEFORE setting a sensitive operation to SUCCEEDED.
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
       const c=JSON.parse(op.command_json);
@@ -105,6 +121,21 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       allowed.map(()=>"?").join(",")+")")
       .bind(status,String(b.result_code||"").slice(0,64),detail,status==="RUNNING"?null:now(),opId,id,...allowed).run();
     must(changes.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
+    if(op.action==="ssh.verification.prepare"&&status!=="RUNNING"){
+      const c=JSON.parse(op.command_json);
+      if(status==="SUCCEEDED"){
+        await env.DB.prepare(
+          "UPDATE ssh_verifications SET prepared_at=? WHERE id=? AND node_id=? AND status='PENDING' AND expires_at>?"
+        ).bind(now(),c.payload.verification_id,id,now()).run();
+      }else{
+        // A failed helper preparation cannot later be mistaken for a usable
+        // verification challenge. It never grants login or SSH permissions.
+        await env.DB.prepare(
+          "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
+          "WHERE id=? AND node_id=? AND status='PENDING'"
+        ).bind(now(),c.payload.verification_id,id).run();
+      }
+    }
     if(status==="SUCCEEDED"&&op.action==="ssh.policy.inspect"&&plain(b.detail)){
       const previous=await env.DB.prepare("SELECT config_revision,init_stage FROM nodes WHERE id=?")
         .bind(id).first<{config_revision:string;init_stage:string}>();
