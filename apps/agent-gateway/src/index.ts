@@ -85,6 +85,12 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     must(op,"OPERATION_NOT_FOUND",404);
     const allowed=status==="RUNNING"?["DISPATCHED"]:["DISPATCHED","RUNNING"];
     must(allowed.includes(op.status),"INVALID_STATUS_TRANSITION",409);
+    // Validate helper proof BEFORE setting a sensitive operation to SUCCEEDED.
+    if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
+      const c=JSON.parse(op.command_json);
+      must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
+        "INSTALL_PROOF_MISSING",409);
+    }
     const detail=JSON.stringify(b.detail||{}).slice(0,3500);
     const changes=await env.DB.prepare("UPDATE operations SET status=?,result_code=?,detail=?,finished_at=? WHERE id=? AND node_id=? AND status IN ("+
       allowed.map(()=>"?").join(",")+")")
@@ -92,9 +98,6 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     must(changes.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
       const c=JSON.parse(op.command_json);
-      // Future privileged helper results must include exact installed fingerprint.
-      must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
-        "INSTALL_PROOF_MISSING",409);
       await env.DB.prepare("INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) VALUES (?,?,?,?,'daily','installed')")
         .bind(crypto.randomUUID(),id,c.payload.key_id,c.payload.login_user).run();
       await env.DB.prepare("UPDATE nodes SET init_stage='WAITING_VERIFICATION' WHERE id=?").bind(id).run();

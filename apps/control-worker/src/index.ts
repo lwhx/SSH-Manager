@@ -74,6 +74,39 @@ async function freshPairToken(env:Env,user:Actor,nodeId:string){
   await audit(env,user,nodeId,"node.pairing_token","created");
   return {token,expires_in:600};
 }
+
+async function queueNodeOperation(
+  req:Request, env:Env, a:Actor, node:any,
+  action:"node.preflight"|"ssh.daily.install", payload:Record<string,unknown>
+):Promise<Response>{
+  ensure(isOnline(node),"NODE_OFFLINE",409);
+  const idem=req.headers.get("Idempotency-Key");
+  ensure(idem&&/^[a-zA-Z0-9_-]{12,100}$/.test(idem),"IDEMPOTENCY_KEY_REQUIRED");
+  const exists=await env.DB.prepare("SELECT id,status FROM operations WHERE operator_id=? AND idempotency_key=?").bind(a.id,idem).first<any>();
+  if(exists)return response({operation_id:exists.id,status:exists.status});
+  ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
+  await env.DB.prepare("UPDATE operations SET status='EXPIRED' WHERE node_id=? AND status='CREATED' AND expires_at<=?").bind(node.id,now()).run();
+  const pending=await env.DB.prepare("SELECT id FROM operations WHERE node_id=? AND status IN ('CREATED','DISPATCHED','RUNNING') AND expires_at>? LIMIT 1").bind(node.id,now()).first();
+  ensure(!pending,"NODE_OPERATION_IN_PROGRESS",409);
+  const id=crypto.randomUUID(),t=now();
+  const cmd={v:1 as const,id,node_id:node.id,action,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload};
+  const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
+  await env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+    .bind(id,node.id,action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45).run();
+  await audit(env,a,node.id,action,"requested",null,id);
+  // WSS is opportunistic; if no WSS session accepted delivery, HTTPS poll takes over.
+  try{
+    await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(id).run();
+    const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(node.id));
+    const delivered=await stub.fetch("https://node.internal/dispatch",{method:"POST",body:JSON.stringify(signed)});
+    const value=await delivered.json() as {delivered?:number};
+    if(!value.delivered)await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
+  }catch{
+    await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
+  }
+  return response({operation_id:id,status:"QUEUED"},202);
+}
+
 async function handle(req:Request,env:Env):Promise<Response>{
   const url=new URL(req.url);
   const p=url.pathname;
@@ -104,33 +137,18 @@ async function handle(req:Request,env:Env):Promise<Response>{
       ensure(node.status==="unpaired","NODE_ALREADY_PAIRED",409);
       return response(await freshPairToken(env,a,node.id));
     }
+    if(sub==="preflight"&&req.method==="POST"){
+      needRole(a,"admin");
+      return queueNodeOperation(req,env,a,node,"node.preflight",{login_user:node.login_user,ssh_port:node.ssh_port});
+    }
     if(sub==="daily-key/install"&&req.method==="POST"){
-      needRole(a,"admin");ensure(isOnline(node),"NODE_OFFLINE",409);
+      needRole(a,"admin");
+      // The Agent must still reject privileged SSH writes while the P3 helper
+      // and authenticated login-proof workflow are incomplete.
       const key=await env.DB.prepare("SELECT * FROM public_keys WHERE purpose='daily' AND active=1").first<any>();
       ensure(key,"DAILY_KEY_MISSING",409);
-      const idem=req.headers.get("Idempotency-Key");
-      ensure(idem&&/^[a-zA-Z0-9_-]{12,100}$/.test(idem),"IDEMPOTENCY_KEY_REQUIRED");
-      const exists=await env.DB.prepare("SELECT id,status FROM operations WHERE operator_id=? AND idempotency_key=?").bind(a.id,idem).first<any>();
-      if(exists)return response({operation_id:exists.id,status:exists.status});
-      ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
-      const id=crypto.randomUUID(),t=now();
-      const cmd={v:1 as const,id,node_id:node.id,action:"ssh.daily.install" as const,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload:{login_user:node.login_user,public_key:key.public_key,key_id:key.id,fingerprint:key.fingerprint}};
-      const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
-      await env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(id,node.id,cmd.action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45).run();
-      await audit(env,a,node.id,cmd.action,"requested",null,id);
-      // Reserve delivery before WSS dispatch. If no websocket received it,
-      // safely release to HTTPS poll; a completed command is never re-queued.
-      try{
-        await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(id).run();
-        const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(node.id));
-        const delivered=await stub.fetch("https://node.internal/dispatch",{method:"POST",body:JSON.stringify(signed)});
-        const value=await delivered.json() as {delivered?:number};
-        if(!value.delivered)await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
-      }catch{
-        await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
-      }
-      return response({operation_id:id,status:"CREATED"},202);
+      return queueNodeOperation(req,env,a,node,"ssh.daily.install",
+        {login_user:node.login_user,public_key:key.public_key,key_id:key.id,fingerprint:key.fingerprint});
     }
     if(sub==="snapshots"&&req.method==="GET"){
       needRole(a,"admin");const snapshots=await env.DB.prepare("SELECT * FROM ssh_config_snapshots WHERE node_id=? ORDER BY created_at DESC").bind(node.id).all();
@@ -164,7 +182,9 @@ async function handle(req:Request,env:Env):Promise<Response>{
   }
   const opMatch=/^\/api\/v1\/operations\/([a-f0-9-]{36})$/.exec(p);
   if(opMatch&&req.method==="GET"){
-    const op=await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations WHERE id=?").bind(opMatch[1]).first();
+    const op=await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations WHERE id=?").bind(opMatch[1]).first<any>();
+    if(op?.status==="CREATED"&&op.expires_at<=now()){await env.DB.prepare("UPDATE operations SET status=\'EXPIRED\' WHERE id=? AND status=\'CREATED\'").bind(op.id).run();op.status="EXPIRED";}
+    if(op?.status==="DISPATCHED"&&op.expires_at<=now())op.status="RESULT_UNKNOWN";
     ensure(op,"OPERATION_NOT_FOUND",404);return response({operation:op});
   }
   if(p==="/api/v1/audit"&&req.method==="GET"){
