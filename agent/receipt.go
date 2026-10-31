@@ -16,10 +16,8 @@ var errAlreadyClaimed = errors.New("operation already received")
 // never replays a signed command. The future root helper needs its OWN journal.
 func (a *Agent) claimOperation(cmd Command)error{
  if !operationID.MatchString(cmd.ID){return errors.New("invalid operation ID")}
- dir:=a.config.StateDir
- if dir==""{dir=defaultAgentStateDir}
- dir=filepath.Join(dir,"operations")
- if err:=os.MkdirAll(dir,0700);err!=nil{return err}
+ dir,err:=a.operationReceiptsDir()
+ if err!=nil{return err}
  path:=filepath.Join(dir,cmd.ID+".json")
  f,err:=os.OpenFile(path,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600)
  if errors.Is(err,os.ErrExist){return errAlreadyClaimed}

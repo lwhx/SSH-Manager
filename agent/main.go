@@ -107,7 +107,11 @@ func (a *Agent) handle(ctx context.Context,s SignedCommand){
  case "ssh.daily.install","ssh.policy.inspect","ssh.verification.prepare":
   result,err:=a.sendToLocalHelper(ctx,s)
   if err!=nil{
-   report(a,ctx,c.ID,"FAILED","ROOT_HELPER_UNAVAILABLE",map[string]string{"reason":"local root helper not installed or unavailable"})
+   // The socket may have dropped AFTER Root Helper changed authorized_keys.
+   // No FAILED result is trustworthy until the root-only journal confirms
+   // an actual terminal outcome. Never re-execute the signed command.
+   log.Printf("Root operation %s response uncertain: %v",c.ID,err)
+   a.recoverSingleRootOperation(ctx,c.ID,c.Action)
    break
   }
   if !result.OK{
@@ -134,6 +138,7 @@ func run(ctx context.Context,path string)error {
    _,err=a.request(heartbeatCtx,"/agent/v1/heartbeat",map[string]string{"agent_version":"0.1.0","os_id":"linux"})
    cancel()
    if err!=nil{log.Printf("heartbeat: %v",err)}
+   a.recoverClaimedOperations(ctx)
    a.drainOperationReports(ctx)
    a.drainProofOutbox(ctx)
    pollCtx,cancel:=context.WithTimeout(ctx,10*time.Second)
