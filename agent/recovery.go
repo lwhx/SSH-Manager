@@ -103,8 +103,7 @@ func(a *Agent)markOperationSettled(id string)error{
   return verifiedErr
  }
  if err!=nil{return err}
- if _,err=f.WriteString("cloud-terminal-report-confirmed
-");err!=nil{_ = f.Close();return err}
+ if _,err=f.WriteString("cloud-terminal-report-confirmed\n");err!=nil{_ = f.Close();return err}
  if err=f.Sync();err!=nil{_ = f.Close();return err}
  if err=f.Close();err!=nil{return err}
  d,err:=os.Open(dir);if err!=nil{return err}
@@ -120,8 +119,7 @@ func(a *Agent)markManualReview(id,state string)error{
  f,err:=os.OpenFile(path,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600)
  if errors.Is(err,os.ErrExist){return nil}
  if err!=nil{return err}
- if _,err=f.WriteString(state+"
-");err!=nil{_ = f.Close();return err}
+ if _,err=f.WriteString(state+"\n");err!=nil{_ = f.Close();return err}
  if err=f.Sync();err!=nil{_ = f.Close();return err}
  if err=f.Close();err!=nil{return err}
  d,err:=os.Open(dir);if err!=nil{return err}
