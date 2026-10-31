@@ -9,6 +9,7 @@ import NodeSettings,{type NodeSettingsInput} from "./NodeSettings";
 import TaskCenter from "./TaskCenter";
 import VerificationPanel from "./VerificationPanel";
 import NodeSecurityActions from "./NodeSecurityActions";
+import NodeOperationStatus,{type ScopedOperation} from "./NodeOperationStatus";
 import {parseConsoleRoute,consoleRouteHref,consoleNodeTabHref,parseNodeDetailTab,type ConsolePage,type NodeDetailTab} from "./nodeNavigation";
 import {isNodeOnline} from "./nodeDisplay";
 type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:string;status:string;init_stage:string;last_seen_at?:number;config_revision:string;group_name?:string;notes?:string;created_at?:number;agent_version?:string;os_id?:string};
@@ -34,7 +35,7 @@ function App(){
  const [pair,setPair]=useState<PairInfo|null>(null);
  const [keyInput,setKeyInput]=useState({daily:"",rescue:""});
  const [audit,setAudit]=useState<any[]>([]);
- const [operation,setOperation]=useState<string|null>(null);
+ const [operation,setOperation]=useState<ScopedOperation|null>(null);
  const [verification,setVerification]=useState<VerificationInfo|null>(null);
  const [proofPublicInput,setProofPublicInput]=useState("");
  const [proofFingerprintInput,setProofFingerprintInput]=useState("");
@@ -96,21 +97,21 @@ function App(){
  },[selected?.id,verification?.id,verification?.status]);
 
  useEffect(()=>{
-  if(operationState?.status==="SUCCEEDED")void refresh();
- },[operation,operationState?.status]);
+  if(operation?.node_id===route.nodeId&&operationState?.status==="SUCCEEDED")void refresh();
+ },[operation?.node_id,route.nodeId,operationState?.status]);
  useEffect(()=>{
-  if(!operation)return;
+  if(!operation||operation.node_id!==route.nodeId)return;
   let active=true;
   const check=async()=>{
    try{
-    const r=await api<{operation:{status:string;result_code?:string;detail?:string}}>("/operations/"+operation);
+    const r=await api<{operation:{status:string;result_code?:string;detail?:string}}>("/operations/"+operation.id);
     if(active)setOperationState(r.operation);
    }catch(e){if(active)alertError(e);}
   };
   void check();
   const interval=setInterval(()=>void check(),2500);
   return ()=>{active=false;clearInterval(interval);};
- },[operation]);
+ },[operation?.id,operation?.node_id,route.nodeId]);
  async function act(cb:()=>Promise<void>){setBusy(true);setMessage("");try{await cb();await refresh();}catch(e){alertError(e);}finally{setBusy(false);}}
  async function createLink(){
   await act(async()=>{
@@ -160,14 +161,14 @@ function App(){
  async function preflight(node:NodeInfo){
   await act(async()=>{
    const result=await api<{operation_id:string}>("/nodes/"+node.id+"/preflight","POST",{},{"Idempotency-Key":crypto.randomUUID()});
-   setOperation(result.operation_id);setOperationState(null);
+   setOperation({id:result.operation_id,node_id:node.id});setOperationState(null);
    setMessage("只读诊断任务已创建；执行结果会单独显示。");
   });
  }
  async function inspectPolicy(node:NodeInfo){
   await act(async()=>{
    const result=await api<{operation_id:string}>("/nodes/"+node.id+"/ssh-policy/inspect","POST",{},{"Idempotency-Key":crypto.randomUUID()});
-   setOperation(result.operation_id);setOperationState(null);
+   setOperation({id:result.operation_id,node_id:node.id});setOperationState(null);
    setMessage("已请求检查 sshd 最终生效配置。Agent 必须连接独立 Root Helper 才能完成。");
   });
  }
@@ -191,7 +192,7 @@ function App(){
    }>("/nodes/"+node.id+"/ssh-verification/start","POST",{});
    setVerification({node_id:node.id,id:result.verification_id,status:result.status,expires_at:result.expires_at,
      login_user:result.login_user,fingerprint:result.fingerprint,token:result.token,prepared_at:null});
-   setOperation(result.preparation_operation_id);setOperationState(null);
+   setOperation({id:result.preparation_operation_id,node_id:node.id});setOperationState(null);
    setMessage("挑战已签发，正在请求当前 VPS 的 Root Helper 本地准备；这不代表 SSH 登录验证成功。");
   });
  }
@@ -205,7 +206,7 @@ function App(){
  }
  async function installDaily(node:NodeInfo){
   if(!confirm("仅对 "+node.name+"（"+node.login_user+"）部署日常公钥？不关闭密码登录。"))return;
-  await act(async()=>{const result=await api<{operation_id:string}>("/nodes/"+node.id+"/daily-key/install","POST",{},{"Idempotency-Key":crypto.randomUUID()});setOperation(result.operation_id);setOperationState(null);setMessage("已请求安装；需要等待 Agent 回报，不代表已经安装成功。");});
+  await act(async()=>{const result=await api<{operation_id:string}>("/nodes/"+node.id+"/daily-key/install","POST",{},{"Idempotency-Key":crypto.randomUUID()});setOperation({id:result.operation_id,node_id:node.id});setOperationState(null);setMessage("已请求安装；需要等待 Agent 回报，不代表已经安装成功。");});
  }
  async function loadAudit(){
   try{setAudit((await api<{entries:any[]}>("/audit")).entries);}
@@ -279,7 +280,7 @@ function App(){
   onCancel={()=>void cancelVerification(selected)}/>
  <ManualOperations key={selected.id} node={selected} owner={owner} enabled={!!me.manual_ssh_actions_enabled}
     rescueKeyAvailable={keys.some(k=>k.purpose==="rescue")}
-    onOperation={id=>{setOperation(id);setOperationState(null);}}/>{operation&&<div className="hint"><p>任务 ID：{operation}</p><p>实际状态：{operationState?.status||"等待 Agent"} · {operationState?.result_code||""}</p>{operationState?.detail&&<pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{operationState.detail}</pre>}<small>配置检查不能代替可信 SSH 登录验证；安装日常公钥不会关闭密码登录。</small></div>}
+    onOperation={id=>{setOperation({id,node_id:selected.id});setOperationState(null);}}/><NodeOperationStatus nodeId={selected.id} operation={operation} result={operationState}/>
   </section>}
   {detailTab==="history"&&<TaskCenter nodes={nodes} nodeId={selected.id} onOpenNode={id=>navigate("nodes",id)}/>}
   {detailTab==="settings"&&<section className="card"><h3>节点设置</h3>
