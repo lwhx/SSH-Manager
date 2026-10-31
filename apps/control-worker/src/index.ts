@@ -117,7 +117,7 @@ async function freshPairToken(env:Env,user:Actor,nodeId:string){
 
 async function queueNodeOperation(
   req:Request, env:Env, a:Actor, node:any,
-  action:"node.preflight"|"ssh.policy.inspect"|"ssh.daily.install", payload:Record<string,unknown>
+  action:"node.preflight"|"ssh.policy.inspect"|"ssh.daily.install"|"ssh.verification.prepare", payload:Record<string,unknown>
 ):Promise<Response>{
   ensure(isOnline(node),"NODE_OFFLINE",409);
   const idem=req.headers.get("Idempotency-Key");
@@ -134,17 +134,21 @@ async function queueNodeOperation(
   await env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
     .bind(id,node.id,action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45).run();
   await audit(env,a,node.id,action,"requested",null,id);
+  await dispatchPreparedOperation(env,node.id,id,signed);
+  return response({operation_id:id,status:"QUEUED"},202);
+}
+
+async function dispatchPreparedOperation(env:Env,nodeId:string,operationId:string,signed:{command:string;signature:string}):Promise<void>{
   // WSS is opportunistic; if no WSS session accepted delivery, HTTPS poll takes over.
   try{
-    await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(id).run();
-    const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(node.id));
+    await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(operationId).run();
+    const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(nodeId));
     const delivered=await stub.fetch("https://node.internal/dispatch",{method:"POST",body:JSON.stringify(signed)});
     const value=await delivered.json() as {delivered?:number};
-    if(!value.delivered)await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
+    if(!value.delivered)await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(operationId).run();
   }catch{
-    await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(id).run();
+    await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(operationId).run();
   }
-  return response({operation_id:id,status:"QUEUED"},202);
 }
 
 async function handle(req:Request,env:Env):Promise<Response>{
@@ -241,21 +245,45 @@ async function handle(req:Request,env:Env):Promise<Response>{
       ensure(!active,"VERIFICATION_ALREADY_PENDING",409);
       const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
       const nonceHash=await sha256hex(token),id=crypto.randomUUID(),expires=t+VERIFICATION_TTL_SECONDS;
-      await env.DB.prepare(
-        "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,config_revision,nonce_hash,status,"+
-        "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)"
-      ).bind(id,node.id,key.fingerprint,node.login_user,node.config_revision,nonceHash,t,expires,key.id,a.id).run();
+      ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
+      const pendingOp=await env.DB.prepare(
+        "SELECT id FROM operations WHERE node_id=? AND status IN ('CREATED','DISPATCHED','RUNNING') AND expires_at>? LIMIT 1"
+      ).bind(node.id,t).first();
+      ensure(!pendingOp,"NODE_OPERATION_IN_PROGRESS",409);
+      const operationId=crypto.randomUUID();
+      const cmd={
+        v:1 as const,id:operationId,node_id:node.id,action:"ssh.verification.prepare" as const,
+        actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,
+        payload:{
+          verification_id:id,nonce_hash:nonceHash,login_user:node.login_user,
+          fingerprint:key.fingerprint,key_id:key.id,config_revision:node.config_revision,
+          issued_at:t,expires_at:expires
+        }
+      };
+      const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
+      // These records commit together. A failed signed preparation cannot
+      // leave a PENDING verification without an operation to dispatch.
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,config_revision,nonce_hash,status,"+
+          "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)"
+        ).bind(id,node.id,key.fingerprint,node.login_user,node.config_revision,nonceHash,t,expires,key.id,a.id),
+        env.DB.prepare(
+          "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+        ).bind(operationId,node.id,cmd.action,a.id,"verify-"+id,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45)
+      ]);
       await audit(env,a,node.id,"ssh.verification.start","PENDING",null,id);
+      await dispatchPreparedOperation(env,node.id,operationId,signed);
       // No endpoint currently trusts a browser-issued 'verified' claim.
       // The nonce is returned once and NEVER stored as plaintext in D1.
       return response({verification_id:id,token,expires_at:expires,login_user:node.login_user,
-        fingerprint:key.fingerprint,status:"PENDING",trusted_proof_available:false},201);
+        fingerprint:key.fingerprint,status:"PENDING",preparation:"QUEUED",trusted_proof_available:false},201);
     }
     const verificationMatch=/^ssh-verification\/([0-9a-f-]{36})(?:\/cancel)?$/.exec(sub);
     if(verificationMatch){
       needRole(a,"admin");
       const verification=await env.DB.prepare(
-        "SELECT id,node_id,login_user,key_fingerprint,config_revision,status,created_at,expires_at,verified_at,public_key_id "+
+        "SELECT id,node_id,login_user,key_fingerprint,config_revision,status,created_at,expires_at,verified_at,prepared_at,public_key_id "+
         "FROM ssh_verifications WHERE id=? AND node_id=?"
       ).bind(verificationMatch[1],node.id).first<any>();
       ensure(verification,"VERIFICATION_NOT_FOUND",404);
