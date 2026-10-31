@@ -103,8 +103,7 @@ func TestStaleOperationReceiptIsArchivedAndNextReportCanComplete(t *testing.T){
  archived:=filepath.Join(agent.config.StateDir,"reports","rejected",first+".json")
  if _,err:=os.Stat(archived);err!=nil{t.Fatal("stale report was not preserved for audit",err)}
  reason,err:=os.ReadFile(filepath.Join(agent.config.StateDir,"reports","rejected",first+".reason"))
- if err!=nil||string(reason)!="VERIFICATION_PREPARATION_STALE
-"{t.Fatal("archive reason missing")}
+ if err!=nil||string(reason)!="VERIFICATION_PREPARATION_STALE\n"{t.Fatal("archive reason missing")}
  if err:=agent.quarantineOperationReport(second,"NETWORK_UNAVAILABLE");err==nil{
   t.Fatal("network outage must not discard operation result")
  }
