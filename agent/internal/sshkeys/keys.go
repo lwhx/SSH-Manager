@@ -60,7 +60,8 @@ func openHome(home string,uid int)(int,error){
  fd,err:=syscall.Open("/",syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
  if err!=nil{return -1,err}
  if err=checkedDir(fd,uid);err!=nil{syscall.Close(fd);return -1,err}
- for _,name:=range strings.Split(strings.TrimPrefix(home,"/"),"/"){
+ parts:=strings.Split(strings.TrimPrefix(home,"/"),"/")
+ for index,name:=range parts{
   if name==""||name=="."||name==".."{syscall.Close(fd);return -1,errors.New("unsafe home component")}
   next,err:=syscall.Openat(fd,name,syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,0)
   syscall.Close(fd)
@@ -71,7 +72,7 @@ func openHome(home string,uid int)(int,error){
   if err=checkedDir(next,uid);err!=nil{
    var st syscall.Stat_t
    stickyRoot:=syscall.Fstat(next,&st)==nil&&st.Uid==0&&st.Mode&syscall.S_ISVTX!=0&&st.Mode&syscall.S_IFMT==syscall.S_IFDIR
-   if !stickyRoot||name==strings.Split(strings.TrimPrefix(home,"/"),"/")[len(strings.Split(strings.TrimPrefix(home,"/"),"/"))-1]{
+   if !stickyRoot||index==len(parts)-1{
     syscall.Close(next)
     return -1,fmt.Errorf("unsafe home component: %w",err)
    }
@@ -174,6 +175,9 @@ func snapshotAuthorizedKeys(dir string,prior []byte,stat syscall.Stat_t,created 
  if err:=os.MkdirAll(dir,0700);err!=nil{return "",err}
  info,err:=os.Lstat(dir)
  if err!=nil||!info.IsDir()||info.Mode().Perm()&0077!=0{return "",errors.New("snapshot directory must be private and not a symlink")}
+ if owner,ok:=info.Sys().(*syscall.Stat_t);!ok||owner.Uid!=uint32(os.Geteuid()){
+  return "",errors.New("snapshot directory must be owned by the helper")
+ }
  random:=make([]byte,16)
  if _,err=rand.Read(random);err!=nil{return "",err}
  id:=hex.EncodeToString(random)
@@ -187,7 +191,11 @@ func snapshotAuthorizedKeys(dir string,prior []byte,stat syscall.Stat_t,created 
   "original_existed":!created,"original_mode":stat.Mode&0777,
   "original_uid":stat.Uid,"original_gid":stat.Gid,"sha256":fmt.Sprintf("%x",sha256.Sum256(prior)),
  })
- if err=os.WriteFile(filepath.Join(dir,id+".json"),metadata,0600);err!=nil{return "",err}
+ metaFile,err:=os.OpenFile(filepath.Join(dir,id+".json"),os.O_CREATE|os.O_EXCL|os.O_WRONLY,0600)
+ if err!=nil{return "",err}
+ if _,err=metaFile.Write(metadata);err!=nil{_ = metaFile.Close();return "",err}
+ if err=metaFile.Sync();err!=nil{_ = metaFile.Close();return "",err}
+ if err=metaFile.Close();err!=nil{return "",err}
  d,err:=os.Open(dir);if err!=nil{return "",err}
  defer d.Close()
  if err=d.Sync();err!=nil{return "",err}
