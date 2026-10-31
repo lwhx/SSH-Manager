@@ -4,7 +4,7 @@
 
 ## 1. 源代码与受信任构建
 
-- 固定单个 Git commit SHA，Control Worker、Agent Gateway、Linux Agent、Root Helper、prove CLI 必须统一来源。
+- 固定单个 Git commit SHA，统一 Cloudflare Worker、Linux Agent、Root Helper、prove CLI 必须统一来源。
 - GitHub Actions 的常规 CI 必须通过：Go go test -race ./...、go vet、Root Helper 测试、TS check、Vitest、SQLite migrations、local workerd + D1、隔离 OpenSSH 回环新连接。
 - 手动 `workflow_dispatch` 的打包工作流仅生成 Linux amd64/arm64 二进制与 SHA256SUMS，不部署 VPS、Cloudflare 或自动发布生产版本。
 - 产物校验通过哈希和可信 GitHub Actions 运行来源，不将 SHA256SUMS 误称为数字签名。正式版本还需要组织批准的签名与可重复构建策略。
@@ -23,7 +23,7 @@
 
 ## 3. 真实 Staging 发布关卡
 
-- 独立 Cloudflare Access、Workers、Durable Object、D1、命令签名密钥、域名、DNS；绝不复用生产实例。
+- 独立 Control hostname Access、一个 Worker、两个 Custom Domains、同 Worker NodeSession Durable Object、D1、命令签名密钥、DNS；绝不复用生产实例。
 - P3.4 T01–T11 完整真实 VPS 记录：通过前不开放任何生产 P4/P5 操作。
 - P4 实测：公钥 VERIFIED、手动关闭密码、sshd -T -C、生效后新连接仍可用、手动恢复；失败场景绝不自动回滚。
 - P5 实测：单节点救援安装、另一节点不受影响、单节点精准撤销，人工快照回滚，验证故障时 Cloudflare D1 事务原子一致。

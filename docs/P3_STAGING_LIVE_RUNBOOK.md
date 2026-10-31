@@ -26,60 +26,36 @@ Cloudflare Worker、VPS Agent、Root Helper 和 prove CLI 必须来自同一个 
 
 把该 SHA 记入本轮验收记录。后续 VPS 也必须 checkout 同一 SHA。
 
-## 2. 创建完全独立的 Cloudflare Staging
+## 2. 单 Worker、双域名的 Cloudflare Staging
 
-先复制示例配置到被 gitignore 忽略的本地文件：
+统一使用一个 ssh-manager-staging Worker，同时绑定两个自定义域名：
 
-    cp wrangler.gateway.staging.example.jsonc wrangler.gateway.staging.local.jsonc
-    cp wrangler.control.staging.example.jsonc wrangler.control.staging.local.jsonc
+- console-staging.example.com：React 管理网页和 /api/*；由 hostname-based Cloudflare Access 保护
+- agent-staging.example.com：只提供 /agent/v1/*；Agent 使用自己的 Ed25519 签名认证
 
-创建单独的 D1：
+Worker 共用一个 D1（ssh-manager-staging）和一个本地 NodeSession Durable Object；不再部署两个 Workers，也不使用跨 Worker Service binding。
 
-    npx wrangler d1 create ssh-manager-staging
+    npm install
+    npx wrangler login
+    npm run cf:quick
 
-把返回的 Staging database_id 同时填入两个 local 配置。不要复用生产 D1。
+首次填写 Control/Agent 域名、Access Team Domain/AUD/Owner，确认 SINGLE-STAGING。脚本创建/复用 Staging D1，运行迁移，生成签名密钥（私钥仅送入 Worker Secret）并部署一个 Worker。
 
-准备一套仅用于 Staging 的命令 Ed25519 密钥。Control Worker 只保存私钥 Secret；Gateway 只保存对应的 32 字节原始公钥 base64url。不要把私钥写入 GitHub。
+**Cloudflare Access 只能保护管理 hostname，不能配置 Worker-level Access**，否则会拦截 Agent WebSocket。保持 workers_dev=false、preview_urls=false、assets.run_worker_first=true。已有双 Worker 运行实例必须先阅读 docs/MIGRATE_DUAL_TO_SINGLE.md。
 
-写入 Control Secret：
+## 3. 双域名安全边界
 
-    npx wrangler secret put COMMAND_PRIVATE_KEY --config wrangler.control.staging.local.jsonc
+    python scripts/staging_remote_probe.py --staging-only --control-url https://console-staging.example.com --gateway-url https://agent-staging.example.com
 
-应用迁移：
+通过条件：
 
-    npx wrangler d1 migrations apply ssh-manager-staging --remote --config wrangler.gateway.staging.local.jsonc
+- Control 未登录的 /api/v1/health 被 Cloudflare Access 重定向，不能直接公开。
+- Agent /agent/v1/health 返回设备签名 JSON。
+- Agent /api/v1/health、/ 和 /index.html 只能 404，绝不能泄漏管理 API 或 SPA。
+- Control 域名带 Access Session 时也不能访问 /agent/v1/*。
+- 未声明域名、workers.dev、preview URL 必须没有可用管理或 Agent 接口。
 
-先部署 Gateway，再部署 Control：
-
-    npx wrangler deploy --config wrangler.gateway.staging.local.jsonc
-    npx wrangler deploy --config wrangler.control.staging.local.jsonc
-
-绑定两个不同的 Staging 主机名，例如：
-
-- console-staging.example.com -> Control
-- agent-staging.example.com -> Agent Gateway
-
-Cloudflare Access 只保护 Control 主机名。Agent Gateway 主机名不能被浏览器 Access 登录页拦截。
-
-## 3. 先验证远端安全拓扑
-
-从管理员机器运行：
-
-    python3 scripts/staging_remote_probe.py --staging-only --control-url https://console-staging.example.com --gateway-url https://agent-staging.example.com
-
-只有三个检查全部 PASS 才继续：
-
-- separate_origins
-- control_access_boundary
-- agent_gateway_boundary
-
-预期行为：
-
-- Control health 的匿名请求被 Cloudflare Access 重定向。
-- Gateway 的 /agent/v1/health 直接返回 JSON。
-- Gateway 返回 agent_auth=device-ed25519、browser_access_required=false、ssh_writes_enabled=false。
-
-任何 Access 重定向出现在 Agent Gateway 都必须停止联调。
+以上检查未通过，禁止在实际 VPS 上继续验收。
 
 ## 4. 准备一台可销毁的 Linux 测试 VPS
 
