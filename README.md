@@ -28,6 +28,7 @@
 | Durable Object WebSocket 投递 | 初版代码，Agent 已支持 WSS 与 HTTPS 双通道 |
 | Agent 命令验签、过期与白名单 | 初版代码 |
 | P3 安全 authorized_keys 本地模块 | **已实现基础与单元测试，尚未接入特权 Helper** |
+| P3 SSH 有效配置规则解析 | **已提交解析模块与用例，尚未接入特权 Helper** |
 | Agent 日常公钥真正安装 | **未实现，Agent 会明确返回失败** |
 | 可信 SSH 登录证明 | **未实现，后端拒绝调用** |
 | 关闭密码登录 | **锁定** |
@@ -96,7 +97,7 @@ unset TOKEN
 
 - P1：Cloudflare 基础、JWT 身份、D1、中文管理台
 - P2：Agent、配对、加密、实时通信与命令安全
-- P3：SSH 特权 Helper、日常公钥安全安装、可信 SSH 登录验证
+- P3：已开发 `internal/sshkeys` 与 `internal/sshprobe` 两个本地安全组件；下一步实现独立 root-owned Helper、受控日常公钥安装和服务器可信 SSH 登录验证
 - P4：手动关闭密码认证及修改后验证
 - P5：**只对选定 VPS** 启用/撤销救援公钥、手动恢复密码及快照
 - P6：全兼容性测试、审计、升级与生产部署文档
