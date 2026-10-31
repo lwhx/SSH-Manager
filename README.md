@@ -31,6 +31,7 @@
 | P3 SSH 有效配置规则解析 | **已接入 Root Helper，须提供明确 SSH 来源 IP** |
 | Root-only Unix Socket Helper | **基础实现与单元测试，默认禁用日常公钥安装** |
 | Agent 日常公钥真正安装 | **具备本地显式 opt-in 路径，尚未真实 VPS 验收** |
+| 单节点 SSH 验证挑战 | **五分钟挑战签发/查询/撤销与测试已实现，可信证明尚未实现** |
 | 可信 SSH 登录证明 | **未实现，后端拒绝调用** |
 | 关闭密码登录 | **锁定** |
 | 单节点救援与手动回滚 | **锁定** |
@@ -120,3 +121,8 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 ## P3.1 特权 Helper
 
 详情参阅 [P3 Helper 运行与安全验收指南](docs/P3_HELPER.md)。Root Helper 在 VPS 本地独立运行，重新验签并验证 Unix Socket UID，只接受 ssh.policy.inspect 及明确启用的 ssh.daily.install。默认禁用所有 SSH 写入操作，绝不自动修改密码登录方式。
+
+## P3.2 / P3.3 进度
+
+- P3.2：新增 GitHub Actions 临时 Runner 回环 SSH 真实登录验收。已验证正确日常私钥成功、错误私钥失败、原有密码认证配置不变；仍需独立 VPS 与 Cloudflare Staging 验收。
+- P3.3：新增 [日常 SSH 登录验证安全设计及挑战 API](docs/P3_VERIFICATION.md)，目前仅支持发起、查询、撤销五分钟挑战，未实现可信完成认证的服务器端证据。部署前需应用 0003_verification_challenges.sql 迁移。
