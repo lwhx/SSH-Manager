@@ -81,8 +81,25 @@ func handle(conn *net.UnixConn,uid uint32,helper *sshhelper.Handler){
    LocalAction string `json:"local_action"`
    ProofID string `json:"proof_id"`
    Reason string `json:"reason"`
+   OperationID string `json:"operation_id"`
+   Action string `json:"action"`
   }
   if json.Unmarshal(request,&local)==nil&&local.LocalAction!=""{
+   if local.LocalAction=="operation.recover"{
+    // Agent UID came from SO_PEERCRED. Recovery is read-only: only the
+    // root-owned journal and its exact node/action scope may provide a result.
+    if helper.Journal==nil{
+     _=json.NewEncoder(conn).Encode(map[string]any{"state":"ERROR"})
+     return
+    }
+    recovered,e:=helper.Journal.Recover(local.OperationID,helper.Config.NodeID,local.Action)
+    if e!=nil{
+     _=json.NewEncoder(conn).Encode(map[string]any{"state":"ERROR"})
+     return
+    }
+    _=json.NewEncoder(conn).Encode(recovered)
+    return
+   }
    if !helper.Config.EnableSSHProof||helper.Outbox==nil{
     _=json.NewEncoder(conn).Encode(map[string]any{"ok":false,"code":"PROOF_DISABLED"})
     return
