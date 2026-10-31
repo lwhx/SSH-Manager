@@ -30,10 +30,14 @@ function App(){
   try{
    const u=await api<{email:string;role:string}>("/me");setMe(u);
    const n=await api<{nodes:NodeInfo[]}>("/nodes");setNodes(n.nodes);
+   setSelected(previous=>previous?n.nodes.find(node=>node.id===previous.id)||null:null);
    if(u.role!=="viewer"){const k=await api<{keys:KeyInfo[]}>("/keys");setKeys(k.keys);}
   }catch(e){alertError(e);}
  }
  useEffect(()=>{void refresh();},[]);
+ useEffect(()=>{
+  if(operationState?.status==="SUCCEEDED")void refresh();
+ },[operation,operationState?.status]);
  useEffect(()=>{
   if(!operation)return;
   let active=true;
