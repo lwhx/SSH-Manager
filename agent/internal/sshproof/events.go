@@ -14,7 +14,23 @@ import (
  "time"
 )
 
-var accepted = regexp.MustCompile(`^Accepted publickey for ([a-z_][a-z0-9_-]{0,31}[$]?) from ([0-9a-fA-F:.]+) port ([0-9]{1,5}) ssh2: ED25519 SHA256:([A-Za-z0-9+/]{43}) // Package sshproof validates server-observed SSH public-key authentication
+var accepted = regexp.MustCompile(`^Accepted publickey for ([a-z_][a-z0-9_-]{0,31}[$]?) from ([0-9a-fA-F:.]+) port ([0-9]{1,5}) ssh2: ED25519 SHA256:([A-Za-z0-9+/]{43})// Package sshproof validates server-observed SSH public-key authentication
+// evidence. It does NOT unlock SSH authentication changes or accept arbitrary
+// client-supplied SSH_USER_AUTH files.
+package sshproof
+
+import (
+ "encoding/json"
+ "errors"
+ "fmt"
+ "net"
+ "regexp"
+ "strconv"
+ "strings"
+ "time"
+)
+
+)
 // evidence. It does NOT unlock SSH authentication changes or accept arbitrary
 // client-supplied SSH_USER_AUTH files.
 package sshproof
