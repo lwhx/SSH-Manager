@@ -126,3 +126,7 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 
 - P3.2：新增 GitHub Actions 临时 Runner 回环 SSH 真实登录验收。已验证正确日常私钥成功、错误私钥失败、原有密码认证配置不变；仍需独立 VPS 与 Cloudflare Staging 验收。
 - P3.3：新增 [日常 SSH 登录验证安全设计及挑战 API](docs/P3_VERIFICATION.md)，目前仅支持发起、查询、撤销五分钟挑战，未实现可信完成认证的服务器端证据。部署前需应用 0003_verification_challenges.sql 迁移。
+
+## P3.3 当前安全边界
+
+现在已接通 Cloudflare 签名准备命令、单 VPS Agent、Root Helper 私有挑战存储以及准备状态回报。另有只读 sshd journald / Linux 进程链 / nonce 组合验证组件及单元测试。**准备完成不代表已完成 SSH 公钥认证。** 专用证明 Socket、服务端独立签名证明、Cloudflare 一次性可信验签与 Windows/真实 VPS 验收仍待开发，P4 关闭密码登录继续锁定。详见 docs/P3_VERIFICATION.md。

@@ -27,6 +27,26 @@
 
 当全局日常密钥更新、目标节点重新安装日常公钥、SSH 生效配置版本改变时，正在等待的挑战失效。
 
+## 本轮新增：Root Helper 挑战准备与服务器可信证据组件
+
+当前可通过签名命令 ssh.verification.prepare 将一次性挑战的哈希、节点与用户、公钥指纹、配置版本及到期时间发送给目标 VPS。Root Helper 在私有目录保存元数据，不保存明文 token，不修改 SSH 认证配置。
+
+Cloudflare 原子创建 D1 挑战和签名操作，并区分准备完成时间 prepared_at 与真正 SSH 登录认证 verified_at。准备失败会使挑战失效。**准备成功不能把状态设置成 VERIFIED**。
+
+内部 sshproof 组件现在具备：严格解析 sshd Accepted publickey 日志；只读取 Root 本机 journalctl 的受信任 _EXE、_UID、_PID 字段；核对 ED25519 SHA256 公钥指纹、Linux 用户、SSH 客户端 IP/端口与挑战有效期；通过 /proc 校验 Linux 进程祖先，并提供一次性 nonce SHA256 常数时间比较。
+
+其中 Linux 进程 PID 必须由未来专用证明 Socket 的 SO_PEERCRED 提供；不能相信客户端 SSH_CONNECTION 字符串。认证日志必须由 Root 本地 journalctl 获取；不能把用户提交的 JSON、普通 auth.log 文本或 SSH_USER_AUTH 文件视为可信来源。
+
+**尚未开发：**专用 SSH 会话证明 CLI/Socket、Root Helper 单独签署认证证据、Cloudflare 验签后一次性转移到 VERIFIED、Linux 不同发行版 journald E2E 和 Windows 客户端验收。因此，关闭密码登录仍严格锁定。
+
+认证挑战当前状态：
+- PENDING 且 prepared_at 为空：已创建，等待 VPS 本机准备
+- PENDING 且 prepared_at 有值：本机准备完成，但没有可信 SSH 登录证明
+- EXPIRED、CANCELLED、INVALIDATED：失效
+- VERIFIED：尚未实现，不能由任何用户或 Agent API 直接设置
+
+相关迁移为 0004_verification_prepared.sql。有关 journald 受信任字段的机制可参考 systemd.journal-fields 官方手册。旧系统缺少此类字段时必须失败，不允许静默降级。
+
 ## 可信 SSH 登录验证：待实现的严格条件
 
 1. 本地 SSH 客户端使用日常私钥建立**新连接**，明确使用公钥认证，禁止密码/keyboard-interactive 回退与旧连接复用。
