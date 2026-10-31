@@ -91,7 +91,7 @@ printf '%s\n' "$TOKEN" | sudo ./ssh-manager-agent -mode pair -gateway https://ag
 unset TOKEN
 ```
 
-配对令牌通过标准输入传递，避免出现在 Shell 历史和进程列表。配对结束后由管理员创建专门的 `ssh-manager` 服务用户/组，并将 `/etc/ssh-manager` 设置为 `root:ssh-manager`、`0750`，`agent.json` 设置为 `root:ssh-manager`、`0640`（允许 Agent 只读密钥，拒绝修改）。随后以该最小权限账户通过 systemd 运行 Agent（示例文件位于 `agent/ssh-manager-agent.service`；使用前调整权限和目录）。
+配对令牌通过标准输入传递，避免出现在 Shell 历史和进程列表。**必须在配对之前**建立专用 `ssh-manager` 服务账户，并确认 `/etc/ssh-manager` 目录为 `root:ssh-manager 0750`。标准路径的配对操作由 root 执行，它会创建 `ssh-manager:ssh-manager 0600` 的 `agent.json`；Agent 以相同 UID 读取私钥。Root Helper 配置独立保持 `root:root 0600`。**旧文档的 `root:ssh-manager 0640` 与运行时同 UID、0600 权限校验不兼容，禁止使用。**
 
 **重要：** Root Helper 未配置时请求会失败；即使已配置，默认也会因为 `enable_daily_install=false` 而拒绝安装。只有在隔离测试 VPS 中经本机管理员显式开启、完成签名和配置版本检查后，才可能执行**追加日常公钥**，不会关闭密码登录。
 
@@ -125,11 +125,11 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 ## P3.2 / P3.3 进度
 
 - P3.2：新增 GitHub Actions 临时 Runner 回环 SSH 真实登录验收。已验证正确日常私钥成功、错误私钥失败、原有密码认证配置不变；仍需独立 VPS 与 Cloudflare Staging 验收。
-- P3.3：新增 [日常 SSH 登录验证安全设计及挑战 API](docs/P3_VERIFICATION.md)，目前仅支持发起、查询、撤销五分钟挑战，未实现可信完成认证的服务器端证据。部署前需应用 0003_verification_challenges.sql 迁移。
+- P3.3：Root Helper 的独立 Ed25519 签名 SSH 登录证明、Cloudflare 验签及五分钟挑战状态更新已实现。隔离 SSH、SQLite 与本地 workerd/D1 测试均已通过；真实 VPS + Cloudflare Staging 尚未完成。应用 0003–0005 全部迁移。
 
 ## P3.3 当前安全边界
 
-现在已接通 Cloudflare 签名准备命令、单 VPS Agent、Root Helper 私有挑战存储以及准备状态回报。另有只读 sshd journald / Linux 进程链 / nonce 组合验证组件及单元测试。**准备完成不代表已完成 SSH 公钥认证。** 专用证明 Socket、服务端独立签名证明、Cloudflare 一次性可信验签与 Windows/真实 VPS 验收仍待开发，P4 关闭密码登录继续锁定。详见 docs/P3_VERIFICATION.md。
+已接通 Cloudflare 签名准备命令、单 VPS Agent、Root Helper 私有挑战存储、SO_PEERCRED 证明 Socket、Linux SSHD/journald 取证、Root 独立签名、Cloudflare 验签、D1 一次性 VERIFIED 及异常恢复。**准备完成仍不代表登录验证成功，只有完整可信签名证明经控制端验收才是 VERIFIED。** 真实 VPS + Cloudflare Staging 全链路联调仍待完成，P4 密码登录修改继续锁定。
 
 ## P3.3 可信 Root 签名证明（Staging 原型）
 
@@ -150,3 +150,7 @@ Root Helper 签名证明和 Agent 操作结果分别持久化；只有 Cloudflar
 ### P3.3 Root Helper 的可靠终态恢复
 
 Root Helper 执行签名命令后，先在 root-only 日志中持久化准确终态，再回复 Agent。Agent 崩溃重启仅通过只读 Socket 恢复已有结果并上报云端；只有领取记录但无终态时保留人工核查标记，绝不重执行 SSH 修改。详见 [断网恢复设计](docs/P3_RELIABILITY.md)。
+
+### P3.3 本地 workerd / D1 合约验收
+
+GitHub Actions 的 control job 运行 `node scripts/test_gateway_workerd.mjs --local-only`，通过真实本地 Worker + 临时 D1 验证 Agent Ed25519 请求签名、Root 证明验签、nonce 重放拒绝、PENDING→VERIFIED、幂等 ACK、事务审计及故障回滚。只监听本机回环地址，不连接远程 Cloudflare 或任何 VPS。**这不是正式 Cloudflare Staging / 真实 Linux SSHD 端到端验收**，P4 仍未开放。
