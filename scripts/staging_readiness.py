@@ -87,7 +87,7 @@ def get_user(name: str) -> tuple[int, int] | None:
 
 def helper_scope_matches(raw: object, args: argparse.Namespace) -> bool:
     """Compare only non-secret fields; never echo any config value."""
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or any(key in raw for key in SECRET_FIELDS):
         return False
     safe = raw
     return (
@@ -188,15 +188,20 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     login_gid = login[1] if login else -1
 
     checksums = [
+        ('config_directory', ROOT_CONFIG.parent, 'dir', 0, 0o750),
         ('root_config', ROOT_CONFIG, 'file', 0, 0o600),
         ('agent_config', AGENT_CONFIG, 'file', agent_uid, 0o600),
         ('root_state', ROOT_DIR, 'dir', 0, 0o700),
+        ('proof_private_key', ROOT_DIR / 'proof_ed25519', 'file', 0, 0o600),
+        ('proof_outbox', ROOT_DIR / 'proof-outbox', 'dir', 0, 0o700),
         ('agent_state', AGENT_DIR, 'dir', agent_uid, 0o700),
+        ('helper_socket_dir', ROOT_SOCK.parent, 'dir', 0, 0o711),
+        ('proof_socket_dir', PROOF_SOCK.parent, 'dir', 0, 0o711),
         ('helper_socket', ROOT_SOCK, 'socket', 0, 0o660),
         ('proof_socket', PROOF_SOCK, 'socket', 0, 0o660),
     ]
     for section, p, kind, uid, mode in checksums:
-        expected_gid = agent_gid if section == 'helper_socket' else (login_gid if section == 'proof_socket' else None)
+        expected_gid = agent_gid if section in {'helper_socket', 'config_directory'} else (login_gid if section == 'proof_socket' else None)
         result, why = check_meta(p, kind, uid, mode, expected_gid=expected_gid)
         add(section, result, why)
         if section == 'root_config' and result == 'PASS':

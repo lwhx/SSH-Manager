@@ -37,6 +37,16 @@ class CollectorTests(unittest.TestCase):
         omitted = {k: v for k, v in source.items() if k != '_TRANSPORT'}
         self.assertEqual(sr.journal_check(json.dumps(omitted), 'root'), (0, 1))
 
+    def test_secret_field_in_helper_configuration_blocks_readiness(self):
+        args = argparse.Namespace(node_id='10000000-0000-4000-8000-000000000001',
+                                  login_user='root', client_ip='192.0.2.10',
+                                  local_ip='192.0.2.11', ssh_port=22)
+        configuration = {'node_id': args.node_id, 'allowed_user': 'root',
+                         'client_address': args.client_ip, 'local_address': args.local_ip,
+                         'ssh_port': 22, 'enable_ssh_proof': True,
+                         'private_key': 'should-never-be-in-this-config'}
+        self.assertFalse(sr.helper_scope_matches(configuration, args))
+
     def test_no_file_symlink_or_permission_bypass(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'agent.json'
