@@ -21,5 +21,6 @@ jobs:
           node-version: '22'
       - run: npm install
       - run: npm run check
+      - run: python3 scripts/test_migrations.py
       - run: npm run test
       - run: npm run build:web
