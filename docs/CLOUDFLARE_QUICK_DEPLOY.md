@@ -1,30 +1,19 @@
-# SSH Manager V4 — Cloudflare 快捷部署（Staging）
+# Cloudflare 单 Worker 快捷部署（Staging）
 
-> 只用于独立测试环境。不会连接生产 VPS，不会修改任何 SSH 密码认证、救援公钥或回滚开关。真实 Cloudflare + VPS 端到端验收尚未完成。
+**一个 Worker、两个 Custom Domain、一个 D1、一个 NodeSession Durable Object**。仅用于独立测试环境。
 
-## 为什么不用官方 Deploy to Cloudflare 按钮
+## 1. 首次准备
 
-SSH Manager 是包含 Control Worker、Agent Gateway Worker、D1 和 Durable Objects 的多 Worker 项目。官方 Deploy Button 不能从同一个 monorepo 自动部署两套 Worker，本项目提供 Windows/macOS/Linux 通用的一条命令部署脚本。
+在你的 Cloudflare 账户内准备两个属于当前 zone 的自定义域名，例如：
 
-## 第一次部署
+| 用途 | 示例域名 | 身份保护 |
+| --- | --- | --- |
+| 管理面板/API | console-staging.example.com | hostname-based Cloudflare Access；GitHub/Cloudflare 登录、MFA、Owner Allow |
+| Agent 通信 | agent-staging.example.com | 不使用浏览器 Access；Agent Ed25519 设备签名 |
 
-首先在 Cloudflare Zero Trust 中配置 GitHub / Cloudflare 身份来源、MFA，以及只允许自己账号的登录策略。
+还需记录 Access Team Domain（例如 myteam.cloudflareaccess.com）、Control Application AUD、Owner 完整邮箱。**千万别开启 Worker-level Access，它会连 Agent WebSocket 一起拦截。**
 
-为 Control 的预定 hostname 创建 Self-hosted Access Application，例如：
-
-- ssh-manager-control-staging.你的账号.workers.dev
-- 或者已经属于 Cloudflare 的测试域名，例如 console-staging.example.com
-
-Control 必须由 Access 保护；Agent Gateway 不应被浏览器 Access 保护，否则 WebSocket 将返回 403。
-
-你需要事先取得：
-- Zero Trust Team Domain，示例：myteam.cloudflareaccess.com
-- Control Access Application AUD（不是 Token，不是 Secret）
-- 初始 Owner 的完整邮箱（与 Access 登录身份一致）
-
-控制台部署前可根据 Cloudflare 账户的 Workers 子域名创建 hostname-based Access Application；也可以在 Worker 部署后开启 worker-level Access，但此时必须核对应用的实际 AUD。没有正确的 Access 应用及登录策略时，不能把这套测试系统当作正式管理面板使用。
-
-Windows PowerShell：
+## 2. Windows PowerShell 一条命令
 
 ~~~powershell
 git clone https://github.com/lwhx/SSH-Manager.git
@@ -34,32 +23,13 @@ npx wrangler login
 npm run cf:quick
 ~~~
 
-首次运行需要输入 Team Domain、Application AUD、Owner 邮箱，并输入 STAGING 确认只使用测试资源。
+按提示填写两个域名、Team Domain、AUD、Owner 邮箱，输入 SINGLE-STAGING。
 
-也支持在终端中提前设置非秘密配置：
+脚本执行 TypeScript 检查、React 构建、Staging D1 创建/复用与迁移，生成 Ed25519 公私钥（私钥仅短暂存在内存，并通过 stdin 导入 Cloudflare Secret），部署**单个** ssh-manager-staging Worker 和两个 Custom Domain。已有同名 D1 必须明确输入 REUSE-SINGLE-D1；不代表旧 DO 已迁移。
 
-~~~powershell
-$env:SSH_MANAGER_ACCESS_TEAM_DOMAIN="myteam.cloudflareaccess.com"
-$env:SSH_MANAGER_ACCESS_AUD="Control应用AUD"
-$env:SSH_MANAGER_OWNER_EMAIL="owner@your-domain.com"
-npm run cf:quick
-~~~
+部署后 Worker 内置身份校验会阻止从 Agent 域名访问任何管理网页/API。运行时静态资源要求 run_worker_first=true；禁用 workers.dev 和 Preview URLs。
 
-## 自动执行内容
-
-1. 检查 TypeScript 并构建 React 中文管理面板。
-2. 检查当前 Cloudflare 账号是否已有 ssh-manager-staging D1；没有则创建；已有则要求明确输入数据库完整名称才能复用。
-3. 将同一个 D1 UUID 写入两份 Staging Wrangler 本地配置（文件已加入 gitignore）。
-4. 生成 Ed25519 签名密钥对。仅将公钥放入 Gateway 配置；将私钥的 PKCS#8 DER base64 直接通过 stdin 上传 Control Worker Secret，不保存到磁盘、Git 或普通配置。
-5. 对 Staging D1 应用远端 migrations。
-6. 先部署 ssh-manager-agent-gateway-staging，再部署 ssh-manager-control-staging。
-7. 本地保存不含私钥的状态文件，用于下次更新保持 D1 和签名密钥稳定。
-
-所有手动 SSH 高危操作开关保持 false，且从不触碰 production Wrangler 配置。
-
-## 后续更新
-
-同一台电脑保留初次部署的两份 Staging Wrangler 配置和 .ssh-manager-deploy/staging.json，执行：
+## 3. 后续自动更新
 
 ~~~powershell
 git pull --ff-only
@@ -67,31 +37,31 @@ npm install
 npm run cf:quick
 ~~~
 
-脚本验证：当前登录 Cloudflare 账号内的 D1 UUID 与已配置的 Staging UUID 相同；Control Worker COMMAND_PRIVATE_KEY Secret 存在；Gateway 公钥、绑定名称和所有安全锁没有被改动。再自动迁移与部署两个 Worker，不产生新签名密钥，不修改任何 VPS。
+复用原 D1 UUID、命令公钥、Worker Secret 和两个自定义域名，不自动轮换签名密钥，不修改任何 VPS。
 
-## 部署后必须核验
+必须保留本地文件 wrangler.single.staging.local.jsonc、.ssh-manager-deploy/single-staging.json（均加入 gitignore、不含私钥）。若更换电脑，需安全迁移环境状态；不得删除配置后对已有环境盲目重新初始化。
 
-Cloudflare Dashboard → Workers & Pages 中确认两个 Worker 均成功部署。Control 所有访问地址都应被 Access 保护，允许名单必须仅包含你的可信登录身份；Agent Gateway 应使用公开 HTTPS/WSS 设备身份签名，而不是浏览器 Access。
+## 4. 验证
 
-随后运行安全拓扑检查（必须提供真实 URL）：
-
-~~~powershell
-python scripts/staging_remote_probe.py --staging-only --control-url https://实际Control域名 --gateway-url https://实际AgentGateway域名
-~~~
-
-只有 Control Access 和 Agent Gateway 边界都 PASS，才可以在一台独立测试 VPS 上继续 P3.4 T01–T11 的真机验收。生产 VPS 不能使用当前版本执行高危 SSH 写入。
-
-## 故障处理
-
-首次初始化中断后，本地状态保持 bootstrapping。下次运行会检查 Control Secret：存在则安全恢复并继续部署；缺失就停止，不会擅自重新生成并覆盖已有 Gateway 公钥。不要删除本地状态强行初始化，以免破坏已配对的设备。
-
-更换电脑时，请安全迁移两份本地 Staging Wrangler 配置和 .ssh-manager-deploy/staging.json（均不包含私钥），再在同一 Cloudflare 账号下执行快捷部署。不要对一个已有设备的部署重复初始化密钥。
-
-预检查与本地测试：
-
-~~~powershell
+离线：
+~~~bash
 npm run test:cf:quick
 npm run cf:quick:dry
 ~~~
 
-这些测试不会连接 Cloudflare。完整验收依旧以 docs/P3_STAGING_LIVE_RUNBOOK.md 和 docs/P3_STAGING_E2E_ACCEPTANCE.md 为准。
+Cloudflare 远程：
+~~~bash
+python scripts/staging_remote_probe.py --staging-only --control-url https://console-staging.example.com --gateway-url https://agent-staging.example.com
+~~~
+
+Control 匿名请求被 Access 拦截；Agent health 直接返回 JSON；Agent 管理 API/HTML/静态文件返回 404，所有检查通过后才能继续单 VPS 的 P3.4 T01–T11。
+
+## 5. 兼容性与中断处理
+
+旧双 Worker 本地配置或 .ssh-manager-deploy/staging.json 被发现时，单 Worker 快捷脚本**主动停止**以防静默替换现有命令密钥；参考 [双 Worker 迁移文档](MIGRATE_DUAL_TO_SINGLE.md)。
+
+首次上传 COMMAND_PRIVATE_KEY 前若中断，脚本不会凭空重建另一把私钥。应检查 Cloudflare 环境并人工恢复，绝不通过删除状态文件绕过校验。
+
+原始 wrangler.single.staging.example.jsonc 只是带占位符的模板，不可直接使用 GitHub 自动部署。后续如接入 GitHub/Cloudflare 自动发布，必须保留同一个 D1、Worker 名、命令签名密钥与 Access 策略，且不能将私钥保存到 GitHub。
+
+当前生产环境没有完成真实 SSHD/journald/Root Helper 端到端安全验收。

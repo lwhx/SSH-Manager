@@ -1,69 +1,78 @@
-# Cloudflare 部署与安全检查
+# SSH Manager V4：Cloudflare 单 Worker + 双自定义域名部署
 
-**本文件描述 V4 原型的配置前置，尚未完成真实生产部署验证。**
+> **仅独立 Staging**。P3.4 真实测试 VPS、Windows 全链路验收未完成，禁止对生产 SSH 认证执行高危操作。
 
-## 资源
+## 目标配置
 
-- 两个 Worker：\`ssh-manager-control\`（需要 Access）；\`ssh-manager-agent-gateway\`（Agent 身份签名）。
-- 一个 D1（生产/Staging 要隔离）。
-- Durable Object \`NodeSession\` 注册在 Gateway；Control 使用跨 Worker DO binding。
-- GitHub/Cloudflare Access 登录来源；\`BOOTSTRAP_OWNER_EMAIL\` 只用于明确的首位 Owner 引导。
-- 命令 Ed25519 密钥对，仅 Control Worker 保存私钥。不要向 GitHub 提交任何 Secret、私钥、D1 令牌。
-- Cloudflare 自定义域名：\`console.example.com\`、\`agent.example.com\`。
+- 唯一 Worker：ssh-manager-staging。
+- 统一入口：apps/single-worker/src/index.ts。
+- 两个 Custom Domains（均属当前 Cloudflare zone）：管理域名 + Agent 域名。
+- 一个 D1：ssh-manager-staging，binding DB。
+- 一个 SQLite Durable Object：本 Worker 导出的 NodeSession，binding NODE_SESSIONS，**无跨 Worker script_name**。
+- ASSETS：apps/console/dist，必须 assets.run_worker_first=true。
+- workers_dev=false、preview_urls=false，拒绝其它访问入口。
+- 同一 Worker 中 COMMAND_PUBLIC_KEY 为公开配置，COMMAND_PRIVATE_KEY 为仅存在 Cloudflare 的 Secret。
 
-## 安装
+**Access 只能保护 Control hostname，不能保护整个 Worker：** Cloudflare Zero Trust 需要为 Control 自定义域名创建 Self-hosted Access Application，配置 GitHub/Cloudflare IdP、MFA、精确 Owner Allow。Agent 自定义域名使用设备 Ed25519 验证，不允许浏览器 Access 阻断 WebSocket。Worker 内部所有管理页面和 API 均再次验签 Access JWT。
 
-1. 修改 wrangler 配置中的 \`REPLACE\` 占位符，并创建 Cloudflare D1。
-2. 通过 \`wrangler secret put COMMAND_PRIVATE_KEY --config wrangler.control.jsonc\` 安全配置 Control 端签名密钥。
-3. 在 Cloudflare Access 中开启 GitHub/Cloudflare 两种 IdP，并明确配置 Allow 策略、MFA 和应用 AUD。不要允许任意 Cloudflare 账号进入。
-4. 设置 \`ACCESS_TEAM_DOMAIN\` 为实际 Access team domain，\`ACCESS_AUD\` 为应用 AUD，\`BOOTSTRAP_OWNER_EMAIL\` 为受信任 Owner 的完整邮箱。
-5. 使用相应 Wrangler 命令运行 D1 migrations，先部署 Gateway，再部署 Control。
-6. 在隔离 Staging 环境运行 JWT 伪造/过期、配对令牌重复、Agent 签名重放和 WebSocket 连通性测试。
-7. 真实 VPS 验证之前，不要启用 SSH 写操作。
+Control 与 Agent 域名必须不同，DNS/Custom Domain 不得与旧 Worker 或既存 CNAME 冲突。
 
-## 当前实现与不可跳过的安全验收
+## 快捷部署
 
-已实现 Agent 出站通信、Root Helper 限权 Unix Socket、指定 VPS 的日常公钥安装、Root 认证签名、Cloudflare 验签、防重放、D1 一次性状态更新、Agent/Root 持久化操作结果及断网恢复。Owner 为每台 VPS 人工固定 Root Helper 的独立证明公钥。
+先在 Cloudflare Zero Trust 创建 Control 域名的 Access Application，取得 Team Domain、Application AUD、Owner 邮箱。
 
-**真实 VPS + Cloudflare Staging 的端到端验收仍未完成。** GitHub CI 和本地 workerd 合约测试不能替代真实 SSHD journald 认证日志与 VPS 系统权限验证。
+~~~powershell
+git clone https://github.com/lwhx/SSH-Manager.git
+cd SSH-Manager
+npm install
+npx wrangler login
+npm run cf:quick
+~~~
 
-- P4 关闭密码登录、单节点救援公钥启用/撤销及 SSH 配置手动回滚：尚未开发，继续保持锁定。
-- 可信登录的人工验收参见 [P3.3 证明指南](P3_PROOF_END_TO_END.md)。
-- 隔离 VPS 权限、服务账户及预检参见 [Staging 清单](P3_STAGING_DEPLOY_CHECKLIST.md)。
-- Root/Agent 断网与崩溃恢复参见 [P3.3 可靠性](P3_RELIABILITY.md)。
+首次引导输入两个域名、Access Team Domain、AUD、Owner 邮箱，并确认 SINGLE-STAGING。已存在 Staging D1 时必须输入 REUSE-SINGLE-D1，且不能把旧 D1 当作旧 Durable Object 自动迁移。
 
-### 本地 Worker / D1 合约测试（不调用远程服务）
+本地生成的 wrangler.single.staging.local.jsonc、.ssh-manager-deploy/single-staging.json 已在 gitignore 中；它们不保存私钥。快捷脚本按已绑定的 D1、公钥、域名和安全锁检查环境，绝不在更新时自动更换签名密钥。
 
-CI 额外运行：
+后续更新：
 
-```bash
-node scripts/test_gateway_workerd.mjs --local-only
-```
+~~~powershell
+git pull --ff-only
+npm install
+npm run cf:quick
+~~~
 
-脚本使用 `wrangler dev --local`、临时 D1 `--persist-to` 状态目录和仅用于进程内测试的 Ed25519 公私钥，验证真实 Worker 设备认证、Root 证明签名、D1 状态转移、幂等与数据库故障注入。只监听 127.0.0.1，不操作云端数据库或 VPS。运行结束自动移除测试配置和临时目录。
+离线测试（绝不触及云端）：
 
-## 紧急恢复
+~~~powershell
+npm run test:cf:quick
+npm run cf:quick:dry
+~~~
 
-若 SSH 登录和 Agent 同时不可用，本项目无法自行恢复；请使用 VPS 提供商的 VNC、Web Console 或 Rescue Mode。
+## 手动 Wrangler 部署（不使用脚本）
 
-## Agent 配置文件权限（必检）
+复制 wrangler.single.staging.example.jsonc → wrangler.single.staging.local.jsonc。填入 Cloudflare D1 UUID、两域名（routes 及 CONTROL_HOSTNAME/AGENT_HOSTNAME）、Access Team Domain/AUD、Owner 邮箱与命令公钥。私钥 PKCS#8 DER Base64 只能安全上传为 Cloudflare Worker Secret，不提交到 GitHub/D1/Agent。
 
-标准路径 `/etc/ssh-manager/agent.json` 的配对操作应先建立 `ssh-manager` 系统账户并由 root 执行。目录权限为 **`root:ssh-manager 0750`**，设备凭据文件权限必须是 **`ssh-manager:ssh-manager 0600`**。Agent 启动时会拒绝符号链接、组/全局可读权限及其他 UID 拥有的设备私钥。
+~~~bash
+npm install
+npm run check
+npm run build:web
+npx wrangler d1 migrations apply ssh-manager-staging --remote --config wrangler.single.staging.local.jsonc
+npx wrangler deploy --config wrangler.single.staging.local.jsonc
+npx wrangler secret put COMMAND_PRIVATE_KEY --config wrangler.single.staging.local.jsonc
+~~~
 
-Root Helper 的 `/etc/ssh-manager/helper.json` 保持 **`root:root 0600`**，不可与 Agent 设备私钥混放。Root 独立证明私钥在 `/var/lib/ssh-manager-root` 中，不上传云端。
+已配置过 Cloudflare Secret 时不要覆盖旧私钥。所有危险操作开关默认 false。
 
-Agent 的 systemd 状态目录为 **`StateDirectory=ssh-manager-agent`**，存储领取凭据、等待云端确认的回执、人工核查标记；Root Helper 使用 **`StateDirectory=ssh-manager-root`** 保存 root-only 执行日志与签名证明。任何操作的执行结果不确定时都禁止自动重执行 SSH 修改，也禁止自动回滚。
+## 必须完成的安全验收
 
-旧文档曾出现 `agent.json` 为 `root:ssh-manager 0640` 的建议；该权限与现行 Agent 运行时严格的同 UID、0600 检查不兼容，本版以这里的说明为准。
+~~~bash
+python scripts/staging_remote_probe.py --staging-only --control-url https://console-staging.example.com --gateway-url https://agent-staging.example.com
+~~~
 
-## P4/P5 手动 SSH 修改（部署前必须阅读）
+Control 匿名 API 必须被 Access 拦截；Agent /agent/v1/health 正常返回设备签名认证 JSON；Agent /api/v1/health、/ 和 /index.html 必须返回 404。管理域名登录后访问 Agent API 也必须 404。
 
-只有完成 P3.4 T01–T11 真实 VPS + Cloudflare Staging 验收后才可进行独立审查。新版本加入 `0006_manual_ssh_operations.sql`，需要按序应用全部迁移后才能识别人工操作的快照与回执事务。
+检查两个自定义域名确实指向同一个 Worker，且 workers.dev / Preview URLs 均关闭。只有安全拓扑通过才能继续单台 VPS 的 T01–T11 验收。
 
-`MANUAL_SSH_ACTIONS_ENABLED` 在 Control 配置中默认 `false`。Root Helper 的 `enable_password_disable`、`enable_password_restore`、`enable_config_rollback`、`enable_rescue` 同样全部默认 `false`；仅允许独立测试 VPS 上管理员按操作窗口逐项开启，完成后关闭。
+已有双 Worker Staging/生产实例必须先阅读 [人工迁移指南](MIGRATE_DUAL_TO_SINGLE.md)；快捷部署不会自动处理旧 DO 命名空间、Agent 连接、D1 与签名密钥。
 
-Root Helper 的 systemd 服务只允许对 `/etc/ssh/sshd_config.d` 开放必要写权限，不允许整个 `/etc` 可写。安装 P4 配置时要求主 `sshd_config` 的第一条有效配置是 Include `/etc/ssh/sshd_config.d/*.conf`，否则拒绝，不做自动修复。SSH Manager 只创建和删除自己的 drop-in，不执行通用 shell，也不覆盖别人的配置。
-
-Root Helper 执行高危操作后，必须使用只在 root 私有目录存在的证明密钥对操作 ID、当前节点、动作、配置版本和完整结果 SHA256 签名。Agent 只是转发；Cloudflare 只有通过固定 Root 公钥验证后才以 D1 原子事务修改操作、节点、救援状态或快照。Root 回执无法保存、云端验签失败、状态不确定时只能人工核查，绝不重执行和自动回滚。
-
-详细说明：[P4/P5 手动操作](P4_P5_MANUAL_OPERATIONS.md) 与 [P6 上线前门槛](P6_RELEASE_AND_SECURITY_GATE.md)。
+紧急恢复必须使用云厂商 Console/VNC/Rescue。项目永不因 SSH 断开自动回滚或恢复密码登录。
