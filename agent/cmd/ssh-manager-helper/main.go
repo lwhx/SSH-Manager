@@ -74,6 +74,35 @@ func handle(conn *net.UnixConn,uid uint32,helper *sshhelper.Handler){
  if err!=nil||len(request)>16384{
   result=sshhelper.Result{Code:"REQUEST_TOO_LARGE"}
  }else{
+  // Local helper outbox is reachable only by the dedicated Agent UID
+  // (already verified with SO_PEERCRED), not through the public WSS API.
+  var local struct{
+   LocalAction string `json:"local_action"`
+   ProofID string `json:"proof_id"`
+  }
+  if json.Unmarshal(request,&local)==nil&&local.LocalAction!=""{
+   if !helper.Config.EnableSSHProof||helper.Outbox==nil{
+    _=json.NewEncoder(conn).Encode(map[string]any{"ok":false,"code":"PROOF_DISABLED"})
+    return
+   }
+   switch local.LocalAction{
+   case "proof.peek":
+    proof,e:=helper.Outbox.Peek()
+    if errors.Is(e,os.ErrNotExist){
+     _=json.NewEncoder(conn).Encode(map[string]any{"ok":false,"code":"EMPTY"});return
+    }
+    if e!=nil{
+     _=json.NewEncoder(conn).Encode(map[string]any{"ok":false,"code":"OUTBOX_UNAVAILABLE"});return
+    }
+    _=json.NewEncoder(conn).Encode(map[string]any{"ok":true,"proof":proof})
+   case "proof.ack":
+    e:=helper.Outbox.Ack(local.ProofID)
+    _=json.NewEncoder(conn).Encode(map[string]any{"ok":e==nil,"code":"ACK_RECORDED"})
+   default:
+    _=json.NewEncoder(conn).Encode(map[string]any{"ok":false,"code":"ACTION_DENIED"})
+   }
+   return
+  }
   var cmd sshhelper.SignedCommand
   if json.Unmarshal(request,&cmd)!=nil||cmd.Command==""||cmd.Signature==""{
    result=sshhelper.Result{Code:"MALFORMED_SIGNED_COMMAND"}
