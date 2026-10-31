@@ -155,11 +155,18 @@ func main(){
  config:=flag.String("config","/etc/ssh-manager/agent.json","agent config path")
  gateway:=flag.String("gateway","","HTTPS gateway URL (pair only)")
  node:=flag.String("node","","node UUID (pair only)")
- token:=flag.String("token","","short-lived pairing token (pair only)")
+ token:=flag.String("token","","short-lived pairing token (pair only; unsafe in process list)")
+ tokenStdin:=flag.Bool("token-stdin",false,"read pairing token from stdin instead of argv")
  flag.Parse()
  ctx,stop:=signal.NotifyContext(context.Background(),syscall.SIGTERM,syscall.SIGINT);defer stop()
  var err error
  switch *mode {case "run":err=run(ctx,*config);case "pair":
+  if *tokenStdin{
+   if *token!=""{log.Fatal("choose token or token-stdin, not both")}
+   b,readErr:=io.ReadAll(io.LimitReader(os.Stdin,512))
+   if readErr!=nil{log.Fatal(readErr)}
+   *token=strings.TrimSpace(string(b))
+  }
   if *gateway==""||*node==""||*token==""{log.Fatal("pair requires gateway, node, token")}
   err=pair(ctx,*gateway,*node,*token,*config)
  default:err=errors.New("unknown mode")}

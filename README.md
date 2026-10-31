@@ -24,9 +24,10 @@
 | D1 数据结构和版本化迁移 | 初版代码 |
 | 全局两种公钥保存（不自动安装） | 初版代码 |
 | Node 配对令牌与 Agent Ed25519 身份 | 初版代码 |
-| Agent HTTPS 心跳、轮询与签名报告 | 初版代码 |
-| Durable Object WebSocket 投递 | 初版代码，Agent 目前使用 HTTPS 轮询 |
+| Agent WSS 长连接 + HTTPS 备用轮询与签名报告 | 初版代码 |
+| Durable Object WebSocket 投递 | 初版代码，Agent 已支持 WSS 与 HTTPS 双通道 |
 | Agent 命令验签、过期与白名单 | 初版代码 |
+| P3 安全 authorized_keys 本地模块 | **已实现基础与单元测试，尚未接入特权 Helper** |
 | Agent 日常公钥真正安装 | **未实现，Agent 会明确返回失败** |
 | 可信 SSH 登录证明 | **未实现，后端拒绝调用** |
 | 关闭密码登录 | **锁定** |
@@ -66,6 +67,10 @@ cd agent && go test ./...
 
 更多说明见 [部署须知](docs/DEPLOYMENT.md)。
 
+## 单节点只读检查
+
+在 VPS 详情页可人工点击 **SSH 只读环境检查**。Agent 返回 OS、sshd 文件存在性、Agent 状态；**该结果不等于 SSH 认证规则有效，也不能作为关闭密码登录的依据**。任务实际状态可在页面查询。
+
 ## Agent 配对
 
 在 Web 面板中创建节点、获得 10 分钟的一次性配对令牌。构建 Agent：
@@ -78,10 +83,12 @@ go build -o ssh-manager-agent .
 在 VPS 上通过受信任渠道安装已校验的二进制。配对：
 
 \`\`\`bash
-sudo ./ssh-manager-agent -mode pair -gateway https://agent.example.com -node NODE_UUID -token ONE_TIME_TOKEN -config /etc/ssh-manager/agent.json
+read -rs TOKEN
+printf '%s\n' "$TOKEN" | sudo ./ssh-manager-agent -mode pair -gateway https://agent.example.com -node NODE_UUID -token-stdin -config /etc/ssh-manager/agent.json
+unset TOKEN
 \`\`\`
 
-生成的设备私钥只存于目标 VPS，配置权限应为 0600。随后以专门的最小权限服务账户通过 systemd 运行 Agent（示例文件位于 \`agent/ssh-manager-agent.service\`；使用前调整权限和目录）。
+配对令牌通过标准输入传递，避免出现在 Shell 历史和进程列表。配对结束后由管理员创建专门的 `ssh-manager` 服务用户/组，并将 `/etc/ssh-manager` 设置为 `root:ssh-manager`、`0750`，`agent.json` 设置为 `root:ssh-manager`、`0640`（允许 Agent 只读密钥，拒绝修改）。随后以该最小权限账户通过 systemd 运行 Agent（示例文件位于 \`agent/ssh-manager-agent.service\`；使用前调整权限和目录）。
 
 **重要**：目前 Agent 的 \`ssh.daily.install\` 会返回 \`SSH_HELPER_NOT_IMPLEMENTED\`，不会触碰 SSH 文件。不要将它当作已经完成 SSH 密钥安装。
 

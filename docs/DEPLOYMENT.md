@@ -32,3 +32,11 @@
 ## 紧急恢复
 
 若 SSH 登录和 Agent 同时不可用，本项目无法自行恢复；请使用 VPS 提供商的 VNC、Web Console 或 Rescue Mode。
+
+## Agent 配置文件权限（必检）
+
+`-mode pair` 默认会创建由执行用户拥有、0600 权限的配置文件。若使用 `sudo` 配对，必须在启动非特权 Agent 服务前创建独立的 `ssh-manager` 用户/组，并将 `/etc/ssh-manager` 目录设为 `root:ssh-manager` 0750、`agent.json` 设为 `root:ssh-manager` 0640。Agent 只需读取设备私钥，不能拥有修改配置的能力。
+
+Agent 使用 systemd `StateDirectory=ssh-manager` 保存本地操作收据；同一指令经 WSS 与 HTTPS 重复送达时只处理一次。操作未确认时不会自动回滚。
+
+`agent/internal/sshkeys` 目前仅是**未接入网络/特权 Helper 的受测文件维护模块**；不得单独让 Web 请求触发修改系统 SSH。
