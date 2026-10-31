@@ -98,7 +98,7 @@ func TestLocalSSHDIntegration(t *testing.T){
   return string(b),e
  }
  if _,err:=sshAttempt(clientKey);err==nil{t.Fatal("SSH accepted daily key before installation")}
- result,err:=InstallDaily(home,uid,gid,string(pub),filepath.Join(root,"snapshots"))
+ result,err:=InstallDaily(home,uid,gid,strings.TrimSpace(string(pub)),filepath.Join(root,"snapshots"))
  if err!=nil{t.Fatalf("authorized_keys install: %v",err)}
  if !result.FileChecked||result.SnapshotRef==""{t.Fatalf("invalid installation report %+v",result)}
  output,err:=sshAttempt(clientKey)
