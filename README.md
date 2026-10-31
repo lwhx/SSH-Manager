@@ -2,7 +2,7 @@
 
 基于 **Cloudflare Workers + D1 + Durable Objects + Go Agent** 的多 VPS SSH 密钥管理与紧急救援平台。
 
-> **开发状态：V4 基础原型，尚未生产就绪。** 不要使用它修改生产服务器的 SSH 认证。当前只实现管理平台基础、双公钥存储、Agent 配对/心跳/轮询与受限任务处理。真正的 SSH 公钥安装、可信登录证明、关闭密码登录和单节点救援 **仍然锁定**，必须通过隔离 VPS 的真实 E2E 验收后才可启用。
+> **开发状态：V4 P3.1 安全原型，尚未生产就绪。** 已具备 Cloudflare 管理平台、Agent WSS/HTTPS 通信、Root Helper 的只读配置检查与默认禁用的日常公钥安装路径。**尚未完成真实 VPS 端到端验收，不能用于生产 SSH 修改。** 可信登录证明、关闭密码登录和单节点救援仍然锁定。
 
 ## 产品约束
 
@@ -27,8 +27,8 @@
 | Agent WSS 长连接 + HTTPS 备用轮询与签名报告 | 初版代码 |
 | Durable Object WebSocket 投递 | 初版代码，Agent 已支持 WSS 与 HTTPS 双通道 |
 | Agent 命令验签、过期与白名单 | 初版代码 |
-| P3 安全 authorized_keys 本地模块 | **已实现基础与单元测试，尚未接入特权 Helper** |
-| P3 SSH 有效配置规则解析 | **已提交解析模块与用例，尚未接入特权 Helper** |
+| P3 安全 authorized_keys 本地模块 | **已接入可选 Root Helper，默认禁止写入，待 VPS 验收** |
+| P3 SSH 有效配置规则解析 | **已接入 Root Helper，须提供明确 SSH 来源 IP** |
 | Root-only Unix Socket Helper | **基础实现与单元测试，默认禁用日常公钥安装** |
 | Agent 日常公钥真正安装 | **具备本地显式 opt-in 路径，尚未真实 VPS 验收** |
 | 可信 SSH 登录证明 | **未实现，后端拒绝调用** |
@@ -37,33 +37,33 @@
 
 ### 代码结构
 
-- \`apps/console/\` React 中文面板
-- \`apps/control-worker/\` Access 认证与管理 API
-- \`apps/agent-gateway/\` Agent 网关与 Durable Object
-- \`packages/db/migrations/\` D1 迁移
-- \`packages/protocol/\` 签名协议与安全校验
-- \`agent/\` Go Agent（独立于 SSH daemon）
-- \`docs/\` 部署安全说明
-- \`wrangler.*.jsonc\` Cloudflare Worker 配置
+- `apps/console/` React 中文面板
+- `apps/control-worker/` Access 认证与管理 API
+- `apps/agent-gateway/` Agent 网关与 Durable Object
+- `packages/db/migrations/` D1 迁移
+- `packages/protocol/` 签名协议与安全校验
+- `agent/` Go Agent（独立于 SSH daemon）
+- `docs/` 部署安全说明
+- `wrangler.*.jsonc` Cloudflare Worker 配置
 
 ## 本地开发与部署前置
 
 依赖 Node.js 22+、Go 1.23+、Cloudflare 账户、Wrangler 权限、D1 与 Cloudflare Access 应用。云端资源、身份认证与密钥必须由部署者创建，不应写入仓库。
 
-\`\`\`bash
+```bash
 npm install
 npm run check
 npm run build:web
 cd agent && go test ./...
-\`\`\`
+```
 
 ### Cloudflare 安装概览
 
-1. 创建一套 D1 数据库，分别在 \`wrangler.control.jsonc\` 和 \`wrangler.gateway.jsonc\` 填入真实 database_id。
+1. 创建一套 D1 数据库，分别在 `wrangler.control.jsonc` 和 `wrangler.gateway.jsonc` 填入真实 database_id。
 2. 为控制台设置 Access 应用并配置 GitHub、Cloudflare 两种 IdP 的允许名单。
-3. 创建**不同环境使用不同值**的命令 Ed25519 签名密钥对：控制 Worker 通过 Secret \`COMMAND_PRIVATE_KEY\` 使用 PKCS#8 DER base64；Gateway 的 \`COMMAND_PUBLIC_KEY\` 使用匹配的原始 32 字节 Ed25519 公钥 base64url。生产私钥绝不提交 Git。
-4. 配置控制 Worker 的 \`ACCESS_TEAM_DOMAIN\`、\`ACCESS_AUD\`、\`BOOTSTRAP_OWNER_EMAIL\`。
-5. \`npm run db:migrate:remote\`，之后按顺序部署 Gateway 和 Control Worker。
+3. 创建**不同环境使用不同值**的命令 Ed25519 签名密钥对：控制 Worker 通过 Secret `COMMAND_PRIVATE_KEY` 使用 PKCS#8 DER base64；Gateway 的 `COMMAND_PUBLIC_KEY` 使用匹配的原始 32 字节 Ed25519 公钥 base64url。生产私钥绝不提交 Git。
+4. 配置控制 Worker 的 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`、`BOOTSTRAP_OWNER_EMAIL`。
+5. `npm run db:migrate:remote`，之后按顺序部署 Gateway 和 Control Worker。
 6. 将 Console 主机名绑定到 Access 保护范围，将 Agent 域名绑定到设备认证 Gateway。**Agent 网关必须不能被浏览器 Access 登录策略错误拦截。**
 7. 先在独立 Staging 环境做端到端认证与通信测试，不要接入任何真实生产 VPS。
 
@@ -77,28 +77,28 @@ cd agent && go test ./...
 
 在 Web 面板中创建节点、获得 10 分钟的一次性配对令牌。构建 Agent：
 
-\`\`\`bash
+```bash
 cd agent
 go build -o ssh-manager-agent .
-\`\`\`
+```
 
 在 VPS 上通过受信任渠道安装已校验的二进制。配对：
 
-\`\`\`bash
+```bash
 read -rs TOKEN
 printf '%s\n' "$TOKEN" | sudo ./ssh-manager-agent -mode pair -gateway https://agent.example.com -node NODE_UUID -token-stdin -config /etc/ssh-manager/agent.json
 unset TOKEN
-\`\`\`
+```
 
-配对令牌通过标准输入传递，避免出现在 Shell 历史和进程列表。配对结束后由管理员创建专门的 `ssh-manager` 服务用户/组，并将 `/etc/ssh-manager` 设置为 `root:ssh-manager`、`0750`，`agent.json` 设置为 `root:ssh-manager`、`0640`（允许 Agent 只读密钥，拒绝修改）。随后以该最小权限账户通过 systemd 运行 Agent（示例文件位于 \`agent/ssh-manager-agent.service\`；使用前调整权限和目录）。
+配对令牌通过标准输入传递，避免出现在 Shell 历史和进程列表。配对结束后由管理员创建专门的 `ssh-manager` 服务用户/组，并将 `/etc/ssh-manager` 设置为 `root:ssh-manager`、`0750`，`agent.json` 设置为 `root:ssh-manager`、`0640`（允许 Agent 只读密钥，拒绝修改）。随后以该最小权限账户通过 systemd 运行 Agent（示例文件位于 `agent/ssh-manager-agent.service`；使用前调整权限和目录）。
 
-**重要**：目前 Agent 的 \`ssh.daily.install\` 会返回 \`SSH_HELPER_NOT_IMPLEMENTED\`，不会触碰 SSH 文件。不要将它当作已经完成 SSH 密钥安装。
+**重要：** Root Helper 未配置时请求会失败；即使已配置，默认也会因为 `enable_daily_install=false` 而拒绝安装。只有在隔离测试 VPS 中经本机管理员显式开启、完成签名和配置版本检查后，才可能执行**追加日常公钥**，不会关闭密码登录。
 
 ## 开发路线
 
 - P1：Cloudflare 基础、JWT 身份、D1、中文管理台
 - P2：Agent、配对、加密、实时通信与命令安全
-- P3：已开发 `internal/sshkeys` 与 `internal/sshprobe` 两个本地安全组件；下一步实现独立 root-owned Helper、受控日常公钥安装和服务器可信 SSH 登录验证
+- P3.1：已实现独立 root-owned Helper、受控追加日常公钥及 SSH 生效配置检查；**待独立测试 VPS 真实验收**。P3.2/P3.3：补齐可信 SSH 新连接认证验证。
 - P4：手动关闭密码认证及修改后验证
 - P5：**只对选定 VPS** 启用/撤销救援公钥、手动恢复密码及快照
 - P6：全兼容性测试、审计、升级与生产部署文档
