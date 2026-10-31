@@ -18,12 +18,12 @@ async function verifyDevice(req:Request,env:Env):Promise<string>{
   const device=await env.DB.prepare("SELECT public_key FROM agent_credentials WHERE node_id=? AND revoked_at IS NULL").bind(id).first<{public_key:string}>();
   must(device,"UNAUTHORIZED",401);
   let pub:CryptoKey;
-  try{pub=await crypto.subtle.importKey("raw",decodeBase64url(device.public_key),{name:"Ed25519"},false,["verify"]);}
+  try{pub=await crypto.subtle.importKey("raw",Uint8Array.from(decodeBase64url(device.public_key)),{name:"Ed25519"},false,["verify"]);}
   catch{throw new ApiError("UNAUTHORIZED",401);}
   const raw=req.method==="GET"?"":await req.clone().text();
   const digest=await sha256hex(raw);
   const message=[req.method,path(req),ts,nonce,digest].join("\n");
-  let valid=false;try{valid=await crypto.subtle.verify({name:"Ed25519"},pub,decodeBase64url(signature),new TextEncoder().encode(message));}catch{}
+  let valid=false;try{valid=await crypto.subtle.verify({name:"Ed25519"},pub,Uint8Array.from(decodeBase64url(signature)),new TextEncoder().encode(message));}catch{}
   must(valid,"UNAUTHORIZED",401);
   const inserted=await env.DB.prepare("INSERT OR IGNORE INTO device_nonces(node_id,nonce,expires_at) VALUES (?,?,?)").bind(id,nonce,now()+120).run();
   must(inserted.meta.changes===1,"REPLAY",409);
