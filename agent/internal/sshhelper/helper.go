@@ -140,15 +140,25 @@ func fail(code string,err error)Result{
  if err==nil{return Result{Code:code}}
  return Result{Code:code,Detail:map[string]string{"reason":err.Error()}}
 }
-func (h *Handler) Execute(ctx context.Context,s SignedCommand)Result{
+func (h *Handler) Execute(ctx context.Context,s SignedCommand)(out Result){
  h.defaults()
  cmd,err:=h.Verify(s)
  if err!=nil{return fail("COMMAND_REJECTED",err)}
  if h.Journal==nil{return fail("JOURNAL_UNAVAILABLE",nil)}
  // Only one root helper instance should own the journal and listener.
  // Reserve before any action, including read-only inspection.
- if err=h.Journal.Claim(cmd.ID);err!=nil{return fail("DUPLICATE_OR_UNSAFE_OPERATION",err)}
  if h.EUID()!=0{return fail("ROOT_REQUIRED",nil)}
+ if err=h.Journal.Claim(cmd.ID,cmd.NodeID,cmd.Action);err!=nil{
+  return fail("DUPLICATE_OR_UNSAFE_OPERATION",err)
+ }
+ // If the helper crashes after an SSH write and before this defer commits,
+ // the reservation remains UNCONFIRMED and requires human investigation.
+ // Never return an unpersisted SUCCESS across the root/Agent boundary.
+ defer func(){
+  if err:=h.Journal.Finalize(cmd.ID,cmd.NodeID,cmd.Action,out);err!=nil{
+   out=Result{Code:"ROOT_RESULT_NOT_DURABLE_MANUAL_REVIEW"}
+  }
+ }()
  p,err:=h.Inspect(ctx,h.Config)
  if err!=nil{return fail("SSHD_INSPECTION_FAILED",err)}
  if err=p.DailyKeyEligibility(h.Config.AllowedUser);err!=nil{return fail("UNSUPPORTED_SSH_POLICY",err)}
