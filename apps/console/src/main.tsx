@@ -22,6 +22,9 @@ function App(){
  const [audit,setAudit]=useState<any[]>([]);
  const [operation,setOperation]=useState<string|null>(null);
  const [verification,setVerification]=useState<VerificationInfo|null>(null);
+ const [proofPublicInput,setProofPublicInput]=useState("");
+ const [proofFingerprintInput,setProofFingerprintInput]=useState("");
+ const [pinnedRootProof,setPinnedRootProof]=useState<{fingerprint:string}|null>(null);
  const [linkToken,setLinkToken]=useState("");
  const [linkInput,setLinkInput]=useState("");
  const [operationState,setOperationState]=useState<{status:string;result_code?:string;detail?:string}|null>(null);
@@ -37,6 +40,15 @@ function App(){
   }catch(e){alertError(e);}
  }
  useEffect(()=>{void refresh();},[]);
+ useEffect(()=>{
+  if(!selected||!me||me.role==="viewer"){setPinnedRootProof(null);return;}
+  let live=true;
+  void api<{pinned:{fingerprint:string}|null}>("/nodes/"+selected.id+"/ssh-proof-key")
+   .then(v=>{if(live)setPinnedRootProof(v.pinned)})
+   .catch(e=>{if(live)alertError(e)});
+  return()=>{live=false};
+ },[selected?.id,me?.role]);
+
  useEffect(()=>{
   if(!selected||!verification||verification.status!=="PENDING")return;
   let running=true;
@@ -100,6 +112,18 @@ function App(){
    setMessage("已请求检查 sshd 最终生效配置。Agent 必须连接独立 Root Helper 才能完成。");
   });
  }
+ async function pinRootProof(node:NodeInfo){
+  if(!confirm("只绑定 "+node.name+" 的 Root Helper 证明公钥？请先通过 VPS 控制台独立核对公钥和指纹。"))return;
+  await act(async()=>{
+   const result=await api<{fingerprint:string}>("/nodes/"+node.id+"/ssh-proof-key","POST",{
+    public_key:proofPublicInput.trim(),confirm_node_id:node.id,
+    confirm_fingerprint:proofFingerprintInput.trim()
+   });
+   setPinnedRootProof({fingerprint:result.fingerprint});
+   setProofPublicInput("");setProofFingerprintInput("");
+   setMessage("仅为本台 VPS 固定 Root Helper 证明公钥："+result.fingerprint+"。绑定不会修改 SSH 登录方式。");
+  });
+ }
  async function beginVerification(node:NodeInfo){
   await act(async()=>{
    const result=await api<{
@@ -131,8 +155,17 @@ function App(){
  {message&&<div className="notice" role="status">{message}<button onClick={()=>setMessage("")}>×</button></div>}
  {!me&&<section className="card"><h3>等待 SSH Manager 授权</h3><p>请先通过 Cloudflare Access 使用 GitHub 或 Cloudflare 账户认证。如果这是第二个身份提供方，需要 Owner 从已授权会话生成一次性绑定码。</p><label>5 分钟身份绑定码<input value={linkInput} onChange={e=>setLinkInput(e.target.value)} placeholder="粘贴已授权 Owner 提供的绑定码"/></label><button disabled={busy||!linkInput.trim()} onClick={()=>void claimLink()}>验证并绑定另一登录身份</button></section>}
  {me&&page==="dashboard"&&<><div className="stats"><section className="card"><small>节点总数</small><strong>{nodes.length}</strong></section><section className="card"><small>Agent 在线</small><strong>{nodes.filter(n=>n.status==="online"&&(n.last_seen_at||0)>Date.now()/1000-90).length}</strong></section><section className="card"><small>待验证节点</small><strong>{nodes.filter(n=>n.init_stage!=="COMPLETE").length}</strong></section></div><section className="card"><h3>安全边界</h3><p>日常公钥初始化与可信 SSH 验证是正式关闭密码登录的前置条件。紧急救援公钥仅可由管理员在单台 VPS 上手动启用。当前基础版本不允许任何自动回滚。</p><button onClick={()=>setPage("nodes")}>进入节点管理</button></section></>}
- {me&&page==="nodes"&&<div className="columns"><div><section className="card"><h3>VPS 列表</h3>{nodes.map(n=><button key={n.id} className="node" onClick={()=>{setSelected(n);setOperation(null);setOperationState(null);setVerification(null);}}><b>{n.name}</b><span>{n.ssh_host}:{n.ssh_port} · {n.login_user}</span><em>{n.init_stage} · {n.status}</em></button>)}{!nodes.length&&<p>暂无 VPS。请先添加并配对 Agent。</p>}</section>{me.role!=="viewer"&&<section className="card"><h3>添加 VPS</h3><label>节点名称<input value={draft.name} onChange={e=>setDraft(v=>({...v,name:e.target.value}))}/></label><label>服务器 IP 或域名<input value={draft.ssh_host} onChange={e=>setDraft(v=>({...v,ssh_host:e.target.value}))}/></label><label>登录用户<input value={draft.login_user} onChange={e=>setDraft(v=>({...v,login_user:e.target.value}))}/></label><label>SSH 端口<input type="number" value={draft.ssh_port} onChange={e=>setDraft(v=>({...v,ssh_port:Number(e.target.value)}))}/></label><button disabled={busy} onClick={()=>void createNode()}>创建节点和配对令牌</button>{pair&&<div className="hint"><p>配对令牌（仅显示本次）：</p><code>{pair.token}</code><p>Node ID: {pair.node_id}</p><p>配对令牌有效期 10 分钟。请勿公开分享。</p></div>}</section>}</div><div>{selected?<section className="card"><h3>{selected.name}</h3><p>{selected.ssh_host}:{selected.ssh_port} · 用户 {selected.login_user}</p><p>Agent：{selected.status} · 初始化：{selected.init_stage}</p><p>当前配置版本：{selected.config_revision}</p><button disabled={busy||selected.status!=="online"} onClick={()=>void preflight(selected)}>执行 SSH 只读环境检查</button><button disabled={busy||selected.status!=="online"} onClick={()=>void inspectPolicy(selected)}>检查 SSH 实际生效配置（Helper）</button><button disabled={busy||selected.status!=="online"||selected.config_revision==="unverified"||!keys.some(k=>k.purpose==="daily")} onClick={()=>void installDaily(selected)}>部署日常公钥（不关闭密码）</button><hr/><h4>SSH 日常密钥登录验证</h4><p>先安装日常公钥，再为当前节点生成一次性挑战。<strong>挑战不代表验证成功</strong>：服务器侧认证证据链尚未完成。</p>
- <button disabled={busy||selected.status!=="online"||selected.init_stage!=="WAITING_VERIFICATION"||(verification?.status==="PENDING")}
+ {me&&page==="nodes"&&<div className="columns"><div><section className="card"><h3>VPS 列表</h3>{nodes.map(n=><button key={n.id} className="node" onClick={()=>{setSelected(n);setOperation(null);setOperationState(null);setVerification(null);setPinnedRootProof(null);setProofPublicInput("");setProofFingerprintInput("");}}><b>{n.name}</b><span>{n.ssh_host}:{n.ssh_port} · {n.login_user}</span><em>{n.init_stage} · {n.status}</em></button>)}{!nodes.length&&<p>暂无 VPS。请先添加并配对 Agent。</p>}</section>{me.role!=="viewer"&&<section className="card"><h3>添加 VPS</h3><label>节点名称<input value={draft.name} onChange={e=>setDraft(v=>({...v,name:e.target.value}))}/></label><label>服务器 IP 或域名<input value={draft.ssh_host} onChange={e=>setDraft(v=>({...v,ssh_host:e.target.value}))}/></label><label>登录用户<input value={draft.login_user} onChange={e=>setDraft(v=>({...v,login_user:e.target.value}))}/></label><label>SSH 端口<input type="number" value={draft.ssh_port} onChange={e=>setDraft(v=>({...v,ssh_port:Number(e.target.value)}))}/></label><button disabled={busy} onClick={()=>void createNode()}>创建节点和配对令牌</button>{pair&&<div className="hint"><p>配对令牌（仅显示本次）：</p><code>{pair.token}</code><p>Node ID: {pair.node_id}</p><p>配对令牌有效期 10 分钟。请勿公开分享。</p></div>}</section>}</div><div>{selected?<section className="card"><h3>{selected.name}</h3><p>{selected.ssh_host}:{selected.ssh_port} · 用户 {selected.login_user}</p><p>Agent：{selected.status} · 初始化：{selected.init_stage}</p><p>当前配置版本：{selected.config_revision}</p><button disabled={busy||selected.status!=="online"} onClick={()=>void preflight(selected)}>执行 SSH 只读环境检查</button><button disabled={busy||selected.status!=="online"} onClick={()=>void inspectPolicy(selected)}>检查 SSH 实际生效配置（Helper）</button><button disabled={busy||selected.status!=="online"||selected.config_revision==="unverified"||!keys.some(k=>k.purpose==="daily")} onClick={()=>void installDaily(selected)}>部署日常公钥（不关闭密码）</button><hr/><h4>本台 VPS 的可信 Root Helper</h4>
+ {pinnedRootProof?<p>已绑定本机证明密钥指纹：<code>{pinnedRootProof.fingerprint}</code>（不可由 Agent 直接更换）</p>:
+ <div className="hint"><p>Root Helper 证明公钥尚未绑定。先在该 VPS 本机手动生成并核对签名公钥，再由 Owner 绑定到本节点。</p>
+ {owner&&<>
+  <label>Root Helper 公钥（base64url 格式）<input value={proofPublicInput} onChange={e=>setProofPublicInput(e.target.value)} placeholder="从 VPS 本机复制 43 字符公钥"/></label>
+  <label>本机输出的 SHA256 指纹（须单独确认）<input value={proofFingerprintInput} onChange={e=>setProofFingerprintInput(e.target.value)} placeholder="SHA256:..."/></label>
+  <button disabled={busy||!proofPublicInput.trim()||!proofFingerprintInput.trim()} onClick={()=>void pinRootProof(selected)}>确认并固定本 VPS 证明公钥</button>
+ </>}
+ </div>}
+ <hr/><h4>SSH 日常密钥登录验证</h4><p>先安装日常公钥，再为当前节点生成一次性挑战。<strong>挑战不代表验证成功</strong>：服务器侧认证证据链尚未完成。</p>
+ <button disabled={busy||selected.status!=="online"||selected.init_stage!=="WAITING_VERIFICATION"||!pinnedRootProof||(verification?.status==="PENDING")}
   onClick={()=>void beginVerification(selected)}>生成单节点验证挑战（5分钟）</button>
  {verification&&<div className="hint">
   <strong>验证任务：{verification.status}</strong>
@@ -141,7 +174,7 @@ function App(){
   <p>目标公钥：{verification.fingerprint}</p>
   <p>到期：{new Date(verification.expires_at*1000).toLocaleString()}</p>
   {verification.token&&verification.status==="PENDING"&&<><p>一次性挑战（只在首次显示）：</p><code>{verification.token}</code></>}
-  <p>可信证明组件仍在开发。请勿将手动 SSH 登录测试视为平台已验证。</p>
+  <p>{verification.status==="VERIFIED"?"控制端已接受当前节点的 Root Helper 签名认证证明。仍不自动关闭密码登录。":"只有经本机真实公钥认证、可信证明并通过 Cloudflare 验签，才会进入 VERIFIED。不要凭手工点击认定成功。"}</p>
   {verification.status==="PENDING"&&<button className="secondary" disabled={busy}
     onClick={()=>void cancelVerification(selected)}>撤销本次挑战</button>}
  </div>}
