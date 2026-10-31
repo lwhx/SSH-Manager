@@ -91,8 +91,11 @@ func (a *Agent) verify(s SignedCommand)(Command,error){
  return c,nil
 }
 func report(a *Agent,ctx context.Context,id,status,code string,detail any){
- _,err:=a.request(ctx,"/agent/v1/report",map[string]any{"operation_id":id,"status":status,"result_code":code,"detail":detail})
- if err!=nil{log.Printf("report failed for %s: %v",id,err)}
+ if err:=a.enqueueOperationReport(id,status,code,detail);err!=nil{
+  log.Printf("cannot persist operation result %s (requires operator review): %v",id,err)
+  return
+ }
+ a.drainOperationReports(ctx)
 }
 func (a *Agent) handle(ctx context.Context,s SignedCommand){
  c,err:=a.verify(s);if err!=nil{log.Printf("rejected command: %v",err);return}
@@ -131,6 +134,7 @@ func run(ctx context.Context,path string)error {
    _,err=a.request(heartbeatCtx,"/agent/v1/heartbeat",map[string]string{"agent_version":"0.1.0","os_id":"linux"})
    cancel()
    if err!=nil{log.Printf("heartbeat: %v",err)}
+   a.drainOperationReports(ctx)
    a.drainProofOutbox(ctx)
    pollCtx,cancel:=context.WithTimeout(ctx,10*time.Second)
    raw,err:=a.request(pollCtx,"/agent/v1/poll",map[string]string{})
