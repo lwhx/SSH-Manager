@@ -1,236 +1,242 @@
 #!/usr/bin/env node
-// Cloudflare STAGING quick deploy: one-time interactive bootstrap, then repeatable updates.
-// Never deploys production Worker names, rotates existing signers or touches any VPS.
+// One Cloudflare Worker, two exact Custom Domains, one D1, one local Durable Object.
+// Staging-only: never touches production SSH/VPS or silently rotates keys.
 import {spawnSync} from "node:child_process";
 import {existsSync,mkdirSync,readFileSync,renameSync,writeFileSync} from "node:fs";
 import {dirname,join,resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import {createInterface} from "node:readline/promises";
 import {
- accessSettings,buildConfigs,findStagingDatabase,generateCommandSigner,validateStoredConfigs
+ accessSettings,customDomain,buildSingleConfig,findStagingDatabase,
+ generateCommandSigner,validateStoredConfig
 } from "./cloudflare_quick_lib.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
 const TSC=join(ROOT,"node_modules","typescript","bin","tsc");
 const VITE=join(ROOT,"node_modules","vite","bin","vite.js");
-const CONTROL=join(ROOT,"wrangler.control.staging.local.jsonc");
-const GATEWAY=join(ROOT,"wrangler.gateway.staging.local.jsonc");
-const STATE=join(ROOT,".ssh-manager-deploy","staging.json");
+const CONFIG=join(ROOT,"wrangler.single.staging.local.jsonc");
+const TEMPLATE=join(ROOT,"wrangler.single.staging.example.jsonc");
+const STATE=join(ROOT,".ssh-manager-deploy","single-staging.json");
+const OLD_STATE=join(ROOT,".ssh-manager-deploy","staging.json");
+const OLD_CONTROL=join(ROOT,"wrangler.control.staging.local.jsonc");
+const OLD_GATEWAY=join(ROOT,"wrangler.gateway.staging.local.jsonc");
 const DB_NAME="ssh-manager-staging";
 
-function readJSON(p){return JSON.parse(readFileSync(p,"utf8"));}
-function writeJSON(p,data){
- mkdirSync(dirname(p),{recursive:true,mode:0o700});
- const tmp=p+".tmp-"+process.pid;
- writeFileSync(tmp,JSON.stringify(data,null,2)+"\n",{mode:0o600,flag:"wx"});
- renameSync(tmp,p);
+function readJSON(path){return JSON.parse(readFileSync(path,"utf8"));}
+function writeJSON(path,obj){
+ mkdirSync(dirname(path),{recursive:true,mode:0o700});
+ const temp=path+".tmp-"+process.pid;
+ writeFileSync(temp,JSON.stringify(obj,null,2)+"\n",{flag:"wx",mode:0o600});
+ renameSync(temp,path);
 }
-function runNode(entry,args=[],options={}){
- const capture=options.capture===true;
- const withInput=typeof options.input==="string";
+function run(entry,args=[],opts={}){
+ const capture=opts.capture===true;
+ const input=typeof opts.input==="string";
  const result=spawnSync(process.execPath,[entry,...args],{
   cwd:ROOT,encoding:"utf8",env:process.env,
-  stdio:capture?["ignore","pipe","pipe"]:withInput?["pipe","inherit","inherit"]:"inherit",
-  ...(withInput?{input:options.input}:{}),
-  maxBuffer:4*1024*1024
+  stdio:capture?["ignore","pipe","pipe"]:input?["pipe","inherit","inherit"]:"inherit",
+  ...(input?{input:opts.input}:{}),maxBuffer:4*1024*1024
  });
- if(result.error)throw Error("Command could not start: "+result.error.message);
+ if(result.error)throw Error("Failed to launch command: "+result.error.message);
  if(result.status!==0){
-  // Never include command stdin (potentially the signer private key) in errors.
-  throw Error("Command failed ("+result.status+"): "+(args[0]||"command")+
-   (capture?"; "+String(result.stderr||"").slice(0,300):""));
+  throw Error("Command failed: "+args[0]+
+   (capture?"; "+String(result.stderr||"").slice(0,240):""));
  }
  return capture?String(result.stdout||""):"";
 }
-function wrangler(args,options={}){
- if(!existsSync(WRANGLER))throw Error("Missing Wrangler. Run npm install before npm run cf:quick.");
- return runNode(WRANGLER,args,options);
+function wrangler(args,opts={}){
+ if(!existsSync(WRANGLER))throw Error("Wrangler missing. Run npm install first.");
+ return run(WRANGLER,args,opts);
 }
-function databaseList(){
- const output=wrangler(["d1","list","--json"],{capture:true});
- let parsed;
- try{parsed=JSON.parse(output);}catch{throw Error("Wrangler d1 list did not return JSON; refused to select a database");}
- return findStagingDatabase(parsed,DB_NAME);
+function getDatabase(){
+ let value;
+ try{value=JSON.parse(wrangler(["d1","list","--json"],{capture:true}));}
+ catch{throw Error("Cannot read the Cloudflare D1 list safely. Check Wrangler login/account.");}
+ return findStagingDatabase(value,DB_NAME);
 }
-function verifyDatabase(id){
- const remote=databaseList();
- if(!remote||remote.id!==id){
-  throw Error("Current Cloudflare account does not contain the expected STAGING D1 UUID; refusing deploy");
+function ensureDatabase(id){
+ const db=getDatabase();
+ if(!db||db.id!==id)throw Error("Cloudflare D1 UUID does not match saved staging DB. Stop.");
+}
+function ensureSecret(){
+ let list;
+ try{list=JSON.parse(wrangler(["secret","list","--config",CONFIG],{capture:true}));}
+ catch{throw Error("Could not verify existing COMMAND_PRIVATE_KEY secret. Refusing redeploy.");}
+ if(!Array.isArray(list)||!list.some(x=>x?.name==="COMMAND_PRIVATE_KEY")){
+  throw Error("COMMAND_PRIVATE_KEY missing; signer cannot be recreated automatically. Manual recovery needed.");
  }
 }
-function verifyControlSecret(){
- let existing;
- try{existing=JSON.parse(wrangler(["secret","list","--config",CONTROL],{capture:true}));}
- catch{throw Error("Cannot verify Control Worker secret; refusing keyless redeploy");}
- if(!Array.isArray(existing)||!existing.some(item=>item?.name==="COMMAND_PRIVATE_KEY")){
-  throw Error("COMMAND_PRIVATE_KEY is missing on Control Worker; refusing silent signer rotation");
+function rejectDualState(){
+ if(existsSync(OLD_STATE)||existsSync(OLD_CONTROL)||existsSync(OLD_GATEWAY)){
+  throw Error("Existing dual-Worker bootstrap state detected. Migration is NOT automatic. "+
+   "Follow docs/MIGRATE_DUAL_TO_SINGLE.md and preserve current D1/signing keys.");
  }
 }
-function validateLocal(){
- const count=Number(existsSync(CONTROL))+Number(existsSync(GATEWAY))+Number(existsSync(STATE));
- if(count!==0&&count!==3)throw Error("Partial local staging state: do not regenerate a signer; inspect local files");
+function localState(){
+ const count=Number(existsSync(CONFIG))+Number(existsSync(STATE));
+ if(count!==0&&count!==2)throw Error("Partial staging config/state. Refusing to regenerate signer.");
  if(count===0)return null;
- const control=readJSON(CONTROL),gateway=readJSON(GATEWAY),state=readJSON(STATE);
- validateStoredConfigs(control,gateway,state);
- return {control,gateway,state};
+ const cfg=readJSON(CONFIG),state=readJSON(STATE);
+ validateStoredConfig(cfg,state);
+ return {cfg,state};
 }
 function build(){
- if(!existsSync(TSC)||!existsSync(VITE))throw Error("Dependencies are missing. Run npm install first.");
- console.log("\n[1/4] Checking code and building the Chinese web panel...");
- runNode(TSC,["--noEmit"]);
- runNode(VITE,["build","--config","apps/console/vite.config.ts"]);
+ if(!existsSync(TSC)||!existsSync(VITE))throw Error("Run npm install first.");
+ console.log("[Build] TypeScript check and Chinese web UI...");
+ run(TSC,["--noEmit"]);
+ run(VITE,["build","--config","apps/console/vite.config.ts"]);
 }
 function migrate(){
- console.log("\nApplying remote D1 migrations (Staging database only)...");
- // Wrangler asks for confirmation when running interactively.
- wrangler(["d1","migrations","apply","DB","--remote","--config",CONTROL]);
+ console.log("[D1] Apply only ssh-manager-staging migrations...");
+ wrangler(["d1","migrations","apply",DB_NAME,"--remote","--config",CONFIG]);
 }
-function deployWorkers(){
- console.log("\n[Workers] Deploying Agent Gateway first...");
- wrangler(["deploy","--config",GATEWAY]);
- console.log("\n[Workers] Deploying Control Worker with web assets...");
- wrangler(["deploy","--config",CONTROL]);
+function deploy(){
+ console.log("[Workers] Deploy exactly one Worker: ssh-manager-staging...");
+ wrangler(["deploy","--config",CONFIG]);
 }
-async function askSetup(){
- if(!process.stdin.isTTY)throw Error(
-  "First deployment needs an interactive terminal. Configure Cloudflare Access first, then run in PowerShell.");
+async function prompts(){
+ if(!process.stdin.isTTY)throw Error("First deployment needs an interactive terminal.");
  const io=createInterface({input:process.stdin,output:process.stdout});
  try{
-  console.log("\nYou must first create a Cloudflare Zero Trust Access application for the "+
-   "Control Worker, with GitHub / Cloudflare identity providers and an allow policy.");
-  const team=process.env.SSH_MANAGER_ACCESS_TEAM_DOMAIN||
-   await io.question("Access team domain (example.cloudflareaccess.com): ");
-  const aud=process.env.SSH_MANAGER_ACCESS_AUD||
-   await io.question("Control Access application AUD (NOT a secret): ");
-  const owner=process.env.SSH_MANAGER_OWNER_EMAIL||
-   await io.question("Initial Owner's full email address: ");
-  const config=accessSettings({team,aud,owner});
-  console.log("\nSTAGING ONLY: create/reuse "+DB_NAME+"; deploy Control and Gateway.");
-  console.log("Control Access MUST restrict the selected hostname or Worker.");
-  console.log("Agent Gateway MUST NOT be protected by browser Access (WSS would fail).");
-  const ok=await io.question('Type STAGING to confirm no production VPS/SSH changes: ');
-  if(ok.trim()!=="STAGING")throw Error("Staging confirmation not supplied; no remote resource created");
-  return config;
+  console.log("\nBefore proceeding, create a Cloudflare Access Self-hosted Application "+
+   "for the CONTROL CUSTOM DOMAIN only, with a strict GitHub/Cloudflare Allow policy and MFA.");
+  const input={
+   controlHost:process.env.SSH_MANAGER_CONTROL_HOSTNAME||
+    await io.question("Control hostname in your Cloudflare zone (e.g. console-staging.example.com): "),
+   agentHost:process.env.SSH_MANAGER_AGENT_HOSTNAME||
+    await io.question("Agent hostname in your Cloudflare zone (e.g. agent-staging.example.com): "),
+   team:process.env.SSH_MANAGER_ACCESS_TEAM_DOMAIN||
+    await io.question("Access team (myteam.cloudflareaccess.com): "),
+   aud:process.env.SSH_MANAGER_ACCESS_AUD||
+    await io.question("Control Access Application AUD: "),
+   owner:process.env.SSH_MANAGER_OWNER_EMAIL||
+    await io.question("Initial Owner email: ")
+  };
+  const controlHost=customDomain(input.controlHost);
+  const agentHost=customDomain(input.agentHost);
+  if(controlHost===agentHost)throw Error("Control and Agent domains must differ");
+  const access=accessSettings(input);
+  console.log("\nWorker custom domains: "+controlHost+" (Access), "+agentHost+" (signed devices).");
+  console.log("This will never deploy old two-Worker names or modify VPS SSH.");
+  const answer=await io.question("Type SINGLE-STAGING to provision a NEW single Worker: ");
+  if(answer.trim()!=="SINGLE-STAGING")throw Error("Confirmation missing; no resources created");
+  return {controlHost,agentHost,...access};
  }finally{io.close();}
 }
-function printNextSteps(){
- console.log("\n==================================================");
- console.log("Staging Workers deployment commands completed.");
- console.log("IMPORTANT: do not connect production VPS yet.");
- console.log("1. In Cloudflare Zero Trust, verify Control Worker is protected by Access.");
- console.log("2. Ensure the Access app uses the configured team domain and AUD.");
- console.log("3. Allow ONLY your GitHub/Cloudflare identities (with MFA).");
- console.log("4. Never put browser Access in front of Agent Gateway WebSockets.");
- console.log("5. Check both Workers' deployed URLs in the Wrangler output above.");
- console.log("6. Run docs/P3_STAGING_LIVE_RUNBOOK.md T01-T11 before production use.");
- console.log("7. Repeat 'npm run cf:quick' to deploy updates (same D1 and signer).");
- console.log("Manual SSH actions remain LOCKED (false) by default.");
- console.log("==================================================\n");
+function printNext(state){
+ console.log("\nSINGLE WORKER STAGING DEPLOYED (NOT YET SECURITY-VERIFIED).");
+ console.log("Control: https://"+state.control_hostname+" (Access must protect ALL paths)");
+ console.log("Agent:   https://"+state.agent_hostname+" (device Ed25519 only)");
+ console.log("Worker:  "+state.worker_name+"; D1: "+state.database_id);
+ console.log("Do NOT enable worker-level Access: it would block Agent WebSocket upgrades.");
+ console.log("Use a hostname-based Access Application covering ONLY the Control hostname.");
+ console.log("Confirm workers.dev and preview URLs are disabled.");
+ console.log("Run: python scripts/staging_remote_probe.py --staging-only "+
+  "--control-url https://"+state.control_hostname+
+  " --gateway-url https://"+state.agent_hostname);
+ console.log("Validate that the Gateway hostname never serves /api/*, SPA or assets.");
+ console.log("High-risk SSH actions remain OFF. No production VPS deployment was performed.");
+ console.log("To update from this computer: git pull --ff-only && npm install && npm run cf:quick\n");
 }
 async function bootstrap(){
- const cfg=await askSetup();
- console.log("\n[Cloudflare] Checking staging D1...");
- let db=databaseList();
- if(!db){
-  console.log("Creating "+DB_NAME+"...");
-  wrangler(["d1","create",DB_NAME]);
-  db=databaseList();
-  if(!db)throw Error("D1 creation was not visible in account. Stop and inspect Cloudflare dashboard.");
- }else{
-  console.log("Found existing staging D1 "+db.id);
-  if(!process.stdin.isTTY)throw Error("Existing staging D1 requires an interactive confirmation");
+ const input=await prompts();
+ let db=getDatabase();
+ if(db){
   const io=createInterface({input:process.stdin,output:process.stdout});
   try{
-   const answer=await io.question("Type the full name "+DB_NAME+" to REUSE its existing data: ");
-   if(answer.trim()!==DB_NAME)throw Error("Existing database reuse not authorized");
+   console.log("An existing D1 called "+DB_NAME+" was detected.");
+   console.log("WARNING: an existing dual-Worker D1 may be paired to a different "+
+    "Durable Object namespace. Do not migrate a live system with this wizard.");
+   const confirm=await io.question('Type REUSE-SINGLE-D1 to explicitly reuse this data: ');
+   if(confirm.trim()!=="REUSE-SINGLE-D1")throw Error("Existing D1 reuse not approved");
   }finally{io.close();}
+ }else{
+  console.log("[D1] Creating isolated "+DB_NAME+"...");
+  wrangler(["d1","create",DB_NAME]);
+  db=getDatabase();
+  if(!db)throw Error("New staging D1 not visible. Investigate before retrying.");
  }
  const signer=generateCommandSigner();
- const templates={
-  control:readJSON(join(ROOT,"wrangler.control.staging.example.jsonc")),
-  gateway:readJSON(join(ROOT,"wrangler.gateway.staging.example.jsonc"))
- };
- const configs=buildConfigs(templates.control,templates.gateway,{
-  ...cfg,dbId:db.id,publicKey:signer.publicKey
+ const cfg=buildSingleConfig(readJSON(TEMPLATE),{
+  ...input,dbId:db.id,publicKey:signer.publicKey
  });
  const state={
-  environment:"staging",
+  schema:"ssh-manager-single-worker-v1",environment:"staging",
   status:"bootstrapping",
-  database_id:db.id,
-  control_name:configs.control.name,
-  gateway_name:configs.gateway.name,
+  worker_name:cfg.name,database_id:db.id,
   command_public_key:signer.publicKey,
-  // Public material only. Root/device private keys are NEVER saved here.
+  control_hostname:input.controlHost,
+  agent_hostname:input.agentHost,
+  access_team_domain:input.team,
+  access_aud:input.aud,
+  owner_email:input.owner,
   created_at:new Date().toISOString()
  };
- writeJSON(CONTROL,configs.control);
- writeJSON(GATEWAY,configs.gateway);
+ writeJSON(CONFIG,cfg);
  writeJSON(STATE,state);
- console.log("\nStaging configs created locally and excluded from Git.");
+ console.log("[Local] Immutable public staging config saved; private key is NOT stored.");
  migrate();
- deployWorkers();
- console.log("\nUploading ephemeral PKCS#8 signer to Control Worker secret store...");
- // The private key exists only in this Node process and is passed via stdin.
- // It is NOT printed, written to disk or uploaded to GitHub.
- wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONTROL],{
+ deploy();
+ console.log("[Secret] Uploading Ed25519 PKCS#8 via stdin to SAME Worker...");
+ wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG],{
   input:signer.privateKeyPkcs8Base64+"\n"
  });
  state.status="ready";
  writeJSON(STATE,state);
- printNextSteps();
+ printNext(state);
 }
-async function updateExisting(local){
- console.log("\n[Staging] Reusing existing D1, immutable signer and Worker names.");
- verifyDatabase(local.state.database_id);
- verifyControlSecret();
- if(local.state.status==="bootstrapping"){
-  // It is possible a prior run uploaded the secret, then crashed before
-  // recording ready. Only a confirmed existing Cloudflare secret can recover.
-  local.state.status="ready";
-  writeJSON(STATE,local.state);
-  console.log("Recovered local staging phase after verifying existing Worker secret.");
- }
+function updateExisting(existing){
+ console.log("[Staging] Reusing existing Worker, D1 and signer. No key rotation.");
+ ensureDatabase(existing.state.database_id);
+ ensureSecret();
  migrate();
- deployWorkers();
- printNextSteps();
+ deploy();
+ if(existing.state.status==="bootstrapping"){
+  existing.state.status="ready";
+  writeJSON(STATE,existing.state);
+  console.log("Recovered interrupted bootstrap only because its original Control signer Secret exists.");
+ }
+ printNext(existing.state);
+}
+function offlineDryRun(){
+ const signer=generateCommandSigner();
+ const cfg=buildSingleConfig(readJSON(TEMPLATE),{
+  dbId:"00000000-0000-4000-8000-000000000001",
+  publicKey:signer.publicKey,
+  controlHost:"console.staging.example.net",
+  agentHost:"agent.staging.example.net",
+  team:"staging.cloudflareaccess.com",
+  aud:"offline-staging-aud-123456789",
+  owner:"test@example.net"
+ });
+ if(cfg.routes.length!==2||cfg.name!=="ssh-manager-staging")throw Error("Dry-run routing invalid");
+ console.log("DRY RUN PASS: ONE Worker, TWO custom domains, one D1/DO, Access gate, signer and SSH write locks.");
+ console.log("No network call, no secrets uploaded, no local configuration modified.");
 }
 async function main(){
  const args=process.argv.slice(2);
- if(args.some(x=>!["--dry-run","--help"].includes(x)))throw Error("Unknown option. Supported: --dry-run, --help");
+ if(args.some(x=>!["--help","--dry-run"].includes(x)))throw Error("Supported: --help, --dry-run");
  if(args.includes("--help")){
-  console.log("Run: npm install && npm run cf:quick");
-  console.log("First run prompts for Access team, AUD, Owner and STAGING confirmation.");
-  console.log("Next runs safely reuse D1 and signer. --dry-run never contacts Cloudflare.");
+  console.log("npm install && npx wrangler login && npm run cf:quick");
+  console.log("Requires two Custom Domains within your Cloudflare zone and a Control-only Access app.");
+  console.log("Repeat for updates without rotating signer. --dry-run is offline.");
   return;
  }
  if(Number(process.versions.node.split(".")[0])<22)throw Error("Node.js 22+ required");
- if(args.includes("--dry-run")){
-  const cfg=buildConfigs(
-   readJSON(join(ROOT,"wrangler.control.staging.example.jsonc")),
-   readJSON(join(ROOT,"wrangler.gateway.staging.example.jsonc")),{
-    dbId:"00000000-0000-4000-8000-000000000001",
-    publicKey:generateCommandSigner().publicKey,
-    team:"staging.cloudflareaccess.com",
-    aud:"staging-aud-dryrun-0123456789",
-    owner:"test@example.net"
-   });
-  console.log("DRY RUN PASS: paired staging Worker configs, DB binding, signer and disabled manual SSH features.");
-  console.log("Target Workers:",cfg.control.name,"+",cfg.gateway.name);
-  console.log("No network calls, no remote resources created, no local config files modified.");
-  return;
- }
- const existing=validateLocal();
- if(!existsSync(WRANGLER))throw Error("Run npm install to install Wrangler first");
+ if(args.includes("--dry-run"))return offlineDryRun();
+ rejectDualState();
+ const existing=localState();
  build();
- if(existing)await updateExisting(existing);
- else await bootstrap();
+ if(existing)return updateExisting(existing);
+ return bootstrap();
 }
 main().catch(err=>{
- console.error("\nQuick deployment stopped safely:",err instanceof Error?err.message:String(err));
- console.error("No production Worker or VPS action was requested.");
- if(existsSync(STATE))console.error(
-  "For interrupted bootstrap, DO NOT delete local state or regenerate keys. "+
-  "If Control secret exists, running again can safely resume.");
+ console.error("\nSingle Worker deployment STOPPED:",err instanceof Error?err.message:String(err));
+ if(existsSync(STATE)){
+  console.error("Existing staged state preserved. DO NOT delete it or auto-rotate keys.");
+  console.error("If the original Cloudflare COMMAND_PRIVATE_KEY is missing, "+
+   "follow manual recovery in docs/MIGRATE_DUAL_TO_SINGLE.md.");
+ }
  process.exitCode=1;
 });
