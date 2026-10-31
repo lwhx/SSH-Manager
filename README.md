@@ -2,7 +2,7 @@
 
 基于 **Cloudflare Workers + D1 + Durable Objects + Go Agent** 的多 VPS SSH 密钥管理与紧急救援平台。
 
-> **开发状态：V4 P3.1 安全原型，尚未生产就绪。** 已具备 Cloudflare 管理平台、Agent WSS/HTTPS 通信、Root Helper 的只读配置检查与默认禁用的日常公钥安装路径。**尚未完成真实 VPS 端到端验收，不能用于生产 SSH 修改。** 可信登录证明、关闭密码登录和单节点救援仍然锁定。
+> **开发状态：V4 P4/P5 功能代码已实现，P3.4 真实 Staging 验收尚未完成，不能用于生产。** P4 人工关闭密码登录、手动恢复/回滚及 P5 单 VPS 救援公钥已打通 Cloudflare → 签名命令 → Agent → Root Helper → 独立 Root 签名回执 → D1 事务；高危操作云端与本地开关默认全部关闭。**CI 通过不等于真实 VPS 验收**。
 
 ## 产品约束
 
@@ -32,9 +32,9 @@
 | Root-only Unix Socket Helper | **基础实现与单元测试，默认禁用日常公钥安装** |
 | Agent 日常公钥真正安装 | **具备本地显式 opt-in 路径，尚未真实 VPS 验收** |
 | 单节点 SSH 验证挑战 | **五分钟挑战签发/查询/撤销与测试已实现，可信证明尚未实现** |
-| 可信 SSH 登录证明 | **未实现，后端拒绝调用** |
-| 关闭密码登录 | **锁定** |
-| 单节点救援与手动回滚 | **锁定** |
+| 可信 SSH 登录证明 | **本地 Root 签名、Cloudflare 验签及 D1 事务已实现；等待真实 VPS E2E** |
+| 人工关闭密码登录 | **P4 代码/面板/签名回执已实现，双侧开关默认关闭；未通过实机验收** |
+| 单节点救援、密码恢复、配置快照回滚 | **P5 代码/面板/Root 签名回执已实现，默认关闭；未通过实机验收** |
 
 ### 代码结构
 
@@ -100,9 +100,9 @@ unset TOKEN
 - P1：Cloudflare 基础、JWT 身份、D1、中文管理台
 - P2：Agent、配对、加密、实时通信与命令安全
 - P3.1：已实现独立 root-owned Helper、受控追加日常公钥及 SSH 生效配置检查；**待独立测试 VPS 真实验收**。P3.2/P3.3：补齐可信 SSH 新连接认证验证。
-- P4：手动关闭密码认证及修改后验证
-- P5：**只对选定 VPS** 启用/撤销救援公钥、手动恢复密码及快照
-- P6：全兼容性测试、审计、升级与生产部署文档
+- P4：手动关闭密码认证、Root 管理的配置片段及原子快照恢复 **代码已实现，等待 Staging 验收**。
+- P5：**只对选定 VPS** 启用/撤销救援公钥、手动恢复密码及配置回滚 **代码已实现，等待 Staging 验收**。
+- P6：发行物构建、安全交付说明和 CI 契约 **开发中**；发行版兼容性与生产上线验收仍未完成。
 
 所有高危步骤必须先通过隔离测试 VPS 的实际测试；未通过不得去掉安全锁。
 
@@ -159,3 +159,18 @@ GitHub Actions 的 control job 运行 `node scripts/test_gateway_workerd.mjs --l
 ### P3.4 独立 Staging VPS 只读准入检查
 
 已新增 [只读 readiness 检查](scripts/staging_readiness.py) 和 [P3.4 Staging E2E 验收矩阵](docs/P3_STAGING_E2E_ACCEPTANCE.md)，要求显式提供当前选中的单台 VPS node UUID、登录用户、SSH 来源/本地 IP 与端口。检查 systemd 服务账户、私钥文件权限、Root Helper 的非敏感节点配置、Socket 属组/0660、可信 journald 和 OpenSSH 有效策略。退出码 0=全部 PASS、2=FAIL、3=仅 WARN；**不读取私钥、不更改 SSH，也不自行设为 VERIFIED**。CI 运行对应 9 项 Python 单元测试，且可信日志候选来源 IP 需要匹配本次指定的 SSH 客户端 IP。
+## P4/P5 单 VPS 人工操作（默认禁止）
+
+**此代码不得在 P3.4 T01–T11 实机验收完成前配置为可用。** P4/P5 路径已经包含独立 Owner 权限、完整节点 UUID 重输、原因和二次确认、短时签名指令、当前 SSH 配置 revision 绑定、Root Helper 本机显式许可、只允许操作当前选中的单 VPS、Root Ed25519 独立签名成功回执、Cloudflare 验签、D1 原子操作/节点/快照/救援状态审计。Agent 不拥有 Root 签名私钥，不能单独声称成功。
+
+### 全部默认关闭的开关
+
+- Cloudflare Control Worker：`MANUAL_SSH_ACTIONS_ENABLED=false`。
+- Root Helper：`enable_password_disable=false`、`enable_password_restore=false`、`enable_config_rollback=false`、`enable_rescue=false`。
+- Root 回执依赖 `enable_ssh_proof=true` 与已由 Owner 单节点固定的 Root 证明公钥，不允许绕过。
+
+只有在真正独立的 Staging 中通过 P3.4 才能另行审查是否启用，不应在生产 VPS 直接将全部开关改为 true。**永不因 SSH 失败、Agent 断连、超时而自动回滚。**
+
+P4 仅写入 OpenSSH 预先包含的 `/etc/ssh/sshd_config.d/00-ssh-manager.conf`；不覆盖管理员的 `sshd_config`。只有具备固定优先级的 Include、可验证的 `sshd -t/-T -C`、Root 私有快照及已通过的新 SSH 公钥登录证明才能继续。手动恢复/回滚只删除仍与原快照哈希一致的 SSH Manager 文件，不覆盖管理员后续修改。救援公钥仅人工单 VPS 安装/精准撤销，并且不做不可靠的定时自动撤销。
+
+详细操作与安全边界见 [P4/P5 人工操作说明](docs/P4_P5_MANUAL_OPERATIONS.md)，发行版测试与交付关卡见 [P6 发行安全门槛](docs/P6_RELEASE_AND_SECURITY_GATE.md)。

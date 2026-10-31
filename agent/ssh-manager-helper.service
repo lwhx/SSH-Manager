@@ -17,6 +17,9 @@ RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
+# P4 only writes the specifically managed OpenSSH drop-in under this directory.
+# The rest of /etc stays read-only in the helper namespace.
+ReadWritePaths=/etc/ssh/sshd_config.d
 ProtectControlGroups=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

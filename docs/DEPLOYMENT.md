@@ -55,3 +55,15 @@ Root Helper 的 `/etc/ssh-manager/helper.json` 保持 **`root:root 0600`**，不
 Agent 的 systemd 状态目录为 **`StateDirectory=ssh-manager-agent`**，存储领取凭据、等待云端确认的回执、人工核查标记；Root Helper 使用 **`StateDirectory=ssh-manager-root`** 保存 root-only 执行日志与签名证明。任何操作的执行结果不确定时都禁止自动重执行 SSH 修改，也禁止自动回滚。
 
 旧文档曾出现 `agent.json` 为 `root:ssh-manager 0640` 的建议；该权限与现行 Agent 运行时严格的同 UID、0600 检查不兼容，本版以这里的说明为准。
+
+## P4/P5 手动 SSH 修改（部署前必须阅读）
+
+只有完成 P3.4 T01–T11 真实 VPS + Cloudflare Staging 验收后才可进行独立审查。新版本加入 `0006_manual_ssh_operations.sql`，需要按序应用全部迁移后才能识别人工操作的快照与回执事务。
+
+`MANUAL_SSH_ACTIONS_ENABLED` 在 Control 配置中默认 `false`。Root Helper 的 `enable_password_disable`、`enable_password_restore`、`enable_config_rollback`、`enable_rescue` 同样全部默认 `false`；仅允许独立测试 VPS 上管理员按操作窗口逐项开启，完成后关闭。
+
+Root Helper 的 systemd 服务只允许对 `/etc/ssh/sshd_config.d` 开放必要写权限，不允许整个 `/etc` 可写。安装 P4 配置时要求主 `sshd_config` 的第一条有效配置是 Include `/etc/ssh/sshd_config.d/*.conf`，否则拒绝，不做自动修复。SSH Manager 只创建和删除自己的 drop-in，不执行通用 shell，也不覆盖别人的配置。
+
+Root Helper 执行高危操作后，必须使用只在 root 私有目录存在的证明密钥对操作 ID、当前节点、动作、配置版本和完整结果 SHA256 签名。Agent 只是转发；Cloudflare 只有通过固定 Root 公钥验证后才以 D1 原子事务修改操作、节点、救援状态或快照。Root 回执无法保存、云端验签失败、状态不确定时只能人工核查，绝不重执行和自动回滚。
+
+详细说明：[P4/P5 手动操作](P4_P5_MANUAL_OPERATIONS.md) 与 [P6 上线前门槛](P6_RELEASE_AND_SECURITY_GATE.md)。
