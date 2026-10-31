@@ -23,7 +23,7 @@ const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
 const TEMPLATE=join(ROOT,"wrangler.single.staging.example.jsonc");
 // Wrangler resolves entrypoint/assets relative to config directory -> repo ROOT.
 const CONFIG=join(ROOT,"wrangler.single.staging.native.jsonc");
-const NAME="ssh-manager-staging";
+const NAME=process.env.WRANGLER_CI_OVERRIDE_NAME||"ssh-manager-staging";
 const DB="ssh-manager-staging";
 
 function run(entry,args,options={}){
@@ -96,7 +96,7 @@ function writeConfig(config){
 }
 function originalSecretExists(){
  let items;
- try{items=JSON.parse(wrangler(["secret","list","--config",CONFIG],{capture:true}));}
+ try{items=JSON.parse(wrangler(["secret","list","--config",CONFIG,"--name",NAME],{capture:true}));}
  catch{throw Error("Unable to verify the existing Worker private signing secret");}
  if(!Array.isArray(items)||!items.some(x=>x?.name==="COMMAND_PRIVATE_KEY"))
   throw Error("Original COMMAND_PRIVATE_KEY missing; manual recovery required, no key rotation");
@@ -112,7 +112,7 @@ function migrate(){
  wrangler(["d1","migrations","apply",DB,"--remote","--config",CONFIG]);
 }
 function deploy(){
- wrangler(["deploy","--config",CONFIG]);
+ wrangler(["deploy","--config",CONFIG,"--name",NAME]);
 }
 function initialize(template){
  const params=newCloudflareBootstrap(process.env);
@@ -126,13 +126,14 @@ function initialize(template){
  if(!created)throw Error("New D1 is not visible. Stop; DO NOT rerun to rotate the signer.");
  const signer=generateCommandSigner();
  const cfg=buildSingleConfig(template,{...params,dbId:created.id,publicKey:signer.publicKey});
+ cfg.name=NAME;
  writeConfig(cfg);
  console.log("[Staging] Created one D1 and prepared one Worker with SSH writes locked.");
  try{
   migrate();
   deploy();
   // Private signer exists ONLY in Node process memory and Cloudflare Secret.
-  wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG],{
+  wrangler(["secret","put","COMMAND_PRIVATE_KEY","--config",CONFIG,"--name",NAME],{
    input:signer.privateKeyPkcs8Base64+"\n"
   });
   originalSecretExists();
@@ -145,6 +146,7 @@ function initialize(template){
 }
 function update(template,remote,dbs){
  const cfg=extractExistingStagingWorker(template,remote,dbs);
+ cfg.name=NAME;
  writeConfig(cfg);
  console.log("[Staging] Reusing existing Worker, domains, Access, D1, DO and public signer.");
  originalSecretExists();
@@ -155,6 +157,8 @@ function update(template,remote,dbs){
 async function main(){
  if(process.argv.length!==2)throw Error("Use npm run cf:deploy without arguments");
  const branch=process.env.WORKERS_CI_BRANCH||process.env.GITHUB_REF_NAME;
+ if(!/^(ssh-manager|ssh-manager-staging)$/.test(NAME))throw Error("Unexpected connected Cloudflare Worker name");
+ if(process.env.WORKERS_CI&&!process.env.WRANGLER_CI_OVERRIDE_NAME)throw Error("Missing Cloudflare Builds Worker target: WRANGLER_CI_OVERRIDE_NAME");
  if(branch&&branch!=="main")throw Error("Only main may deploy Staging; previews are disabled");
  if(existsSync(CONFIG))throw Error("An existing temporary Staging config was found; refusing overwrite");
  if(Number(process.versions.node.split(".")[0])<22)throw Error("Node.js 22+ required");
