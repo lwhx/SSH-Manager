@@ -12,7 +12,7 @@ function uniqueBinding(bindings,name){
  if(matches.length!==1)throw Error("Worker binding missing/duplicate: "+name);
  return matches[0];
 }
-export function extractExistingStagingWorker(template,rawSettings,list){
+export function extractExistingStagingWorker(template,rawSettings,list,{allowMissingSigner=false}={}){
  const bindings=rawSettings?.bindings;
  if(!Array.isArray(bindings)||bindings.length<9)
   throw Error("Remote Worker settings are missing or incomplete; refusing deployment");
@@ -25,9 +25,15 @@ export function extractExistingStagingWorker(template,rawSettings,list){
  }
  if(vars.MANUAL_SSH_ACTIONS_ENABLED!=="false")
   throw Error("Manual SSH writes are enabled on remote Worker; automatic deployment is locked");
- const secret=uniqueBinding(bindings,"COMMAND_PRIVATE_KEY");
- if(secret.type!=="secret_text")
-  throw Error("Existing private signer Secret not found; refusing to generate or replace a key");
+ const secretMatches=bindings.filter(x=>x?.name==="COMMAND_PRIVATE_KEY");
+ if(allowMissingSigner){
+  if(secretMatches.length!==0)
+   throw Error("Existing signer cannot be replaced automatically");
+ }else{
+  const secret=uniqueBinding(bindings,"COMMAND_PRIVATE_KEY");
+  if(secret.type!=="secret_text")
+   throw Error("Existing private signer Secret not found; refusing to rotate a key");
+ }
  const db=uniqueBinding(bindings,"DB");
  if(db.type!=="d1")throw Error("Remote D1 binding has incorrect type");
  const dbId=db.database_id||db.id;
