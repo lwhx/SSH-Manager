@@ -20,3 +20,28 @@ export function parseNodeChanges(input:Record<string,unknown>,current:NodeSettin
    throw Error("PAIRED_NODE_CONNECTION_LOCKED");
  return {name,group_name,notes,ssh_host,ssh_port,login_user};
 }
+
+/**
+ * Optimistic, single-row update: a node that becomes paired (or is edited by
+ * another administrator) between SELECT and PATCH can never be redirected.
+ * Active Agent credentials are a second guard in case status is stale.
+ */
+export function buildNodeSettingsUpdate(
+ nodeId:string,current:NodeSettingsData,changed:Omit<NodeSettingsData,"status">
+):{sql:string;args:(string|number)[]} {
+ const connectionChanged=
+  changed.ssh_host!==current.ssh_host||
+  changed.ssh_port!==current.ssh_port||
+  changed.login_user!==current.login_user;
+ const sql=
+  "UPDATE nodes SET name=?,group_name=?,notes=?,ssh_host=?,ssh_port=?,login_user=? "+
+  "WHERE id=? AND status=? AND name=? AND group_name=? AND notes=? AND ssh_host=? AND ssh_port=? AND login_user=?"+
+  (connectionChanged?
+   " AND NOT EXISTS (SELECT 1 FROM agent_credentials WHERE node_id=? AND revoked_at IS NULL)":"");
+ const args:(string|number)[]=[
+  changed.name,changed.group_name,changed.notes,changed.ssh_host,changed.ssh_port,changed.login_user,
+  nodeId,current.status,current.name,current.group_name,current.notes,current.ssh_host,current.ssh_port,current.login_user
+ ];
+ if(connectionChanged)args.push(nodeId);
+ return {sql,args};
+}

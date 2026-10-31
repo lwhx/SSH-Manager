@@ -1,5 +1,5 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
-import {parseNodeChanges} from "./nodeMetadata";
+import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL} from "./operationStatus";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
@@ -204,13 +204,16 @@ async function handle(req:Request,env:Env):Promise<Response>{
     if(!sub&&req.method==="GET")return response({node});
     if(!sub&&req.method==="PATCH"){
       needRole(a,"admin");
-      let changes;
-      try{changes=parseNodeChanges(await bodyJSON(req),{
+      const current={
         name:node.name,group_name:node.group_name||"",notes:node.notes||"",
         ssh_host:node.ssh_host,ssh_port:node.ssh_port,login_user:node.login_user,status:node.status
-      });}catch(e){throw new ApiError(e instanceof Error?e.message:"INVALID_NODE_SETTINGS",400);}
-      await env.DB.prepare("UPDATE nodes SET name=?,group_name=?,notes=?,ssh_host=?,ssh_port=?,login_user=? WHERE id=?")
-       .bind(changes.name,changes.group_name,changes.notes,changes.ssh_host,changes.ssh_port,changes.login_user,node.id).run();
+      };
+      let changes;
+      try{changes=parseNodeChanges(await bodyJSON(req),current);}
+      catch(e){throw new ApiError(e instanceof Error?e.message:"INVALID_NODE_SETTINGS",400);}
+      const update=buildNodeSettingsUpdate(node.id,current,changes);
+      const outcome=await env.DB.prepare(update.sql).bind(...update.args).run();
+      ensure(outcome.meta.changes===1,"NODE_SETTINGS_CONFLICT",409);
       await audit(env,a,node.id,"node.settings.update","ok");
       return response({node:{...node,...changes}});
     }
