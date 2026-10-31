@@ -6,6 +6,7 @@ interface Env {
   DB:D1Database; NODE_SESSIONS:DurableObjectNamespace; ASSETS:Fetcher;
   ACCESS_TEAM_DOMAIN:string; ACCESS_AUD:string; BOOTSTRAP_OWNER_EMAIL:string;
   COMMAND_PRIVATE_KEY:string;
+  MANUAL_SSH_ACTIONS_ENABLED?:string;
 }
 interface Actor {id:string; email:string; role:string; subject:string;}
 const jsonLimit=8192;
@@ -117,7 +118,7 @@ async function freshPairToken(env:Env,user:Actor,nodeId:string){
 
 async function queueNodeOperation(
   req:Request, env:Env, a:Actor, node:any,
-  action:"node.preflight"|"ssh.policy.inspect"|"ssh.daily.install"|"ssh.verification.prepare", payload:Record<string,unknown>
+  action:"node.preflight"|"ssh.policy.inspect"|"ssh.daily.install"|"ssh.verification.prepare"|"ssh.password.disable"|"ssh.password.restore"|"ssh.config.rollback"|"ssh.rescue.enable"|"ssh.rescue.revoke", payload:Record<string,unknown>
 ):Promise<Response>{
   ensure(isOnline(node),"NODE_OFFLINE",409);
   const idem=req.headers.get("Idempotency-Key");
@@ -131,9 +132,13 @@ async function queueNodeOperation(
   const id=crypto.randomUUID(),t=now();
   const cmd={v:1 as const,id,node_id:node.id,action,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload};
   const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
-  await env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-    .bind(id,node.id,action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45).run();
-  await audit(env,a,node.id,action,"requested",null,id);
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(id,node.id,action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45),
+    env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,?,?,?,'requested',?,?)")
+      .bind(crypto.randomUUID(),a.id,node.id,action,id,
+        typeof payload.reason==="string"?payload.reason.slice(0,280):null,t)
+  ]);
   await dispatchPreparedOperation(env,node.id,id,signed);
   return response({operation_id:id,status:"QUEUED"},202);
 }
@@ -168,7 +173,10 @@ async function handle(req:Request,env:Env):Promise<Response>{
     await audit(env,a,null,"identity.link_token","created");
     return response({token,expires_in:300});
   }
-  if(p==="/api/v1/me"&&req.method==="GET")return response({id:a.id,email:a.email,role:a.role});
+  if(p==="/api/v1/me"&&req.method==="GET")return response({
+    id:a.id,email:a.email,role:a.role,
+    manual_ssh_actions_enabled:env.MANUAL_SSH_ACTIONS_ENABLED==="true"
+  });
   if(p==="/api/v1/nodes"&&req.method==="GET"){
     const q=await env.DB.prepare("SELECT id,name,ssh_host,ssh_port,login_user,status,init_stage,config_revision,agent_version,os_id,last_seen_at,created_at FROM nodes ORDER BY created_at DESC").all();
     return response({nodes:q.results});
@@ -352,6 +360,76 @@ async function handle(req:Request,env:Env):Promise<Response>{
           status:verificationStatus(verification.status,verification.expires_at,now())},
           trusted_proof_available:verification.status==="VERIFIED"});
       }
+    }
+    const manualActions:Record<string,
+      "ssh.password.disable"|"ssh.password.restore"|"ssh.config.rollback"|"ssh.rescue.enable"|"ssh.rescue.revoke">={
+      "ssh/password/disable":"ssh.password.disable",
+      "ssh/password/restore":"ssh.password.restore",
+      "ssh/config/rollback":"ssh.config.rollback",
+      "rescue/enable":"ssh.rescue.enable",
+      "rescue/revoke":"ssh.rescue.revoke"
+    };
+    if(req.method==="POST"&&Object.prototype.hasOwnProperty.call(manualActions,sub)){
+      needRole(a,"owner");
+      ensure(env.MANUAL_SSH_ACTIONS_ENABLED==="true","MANUAL_SSH_FEATURE_DISABLED",503);
+      const b=await bodyJSON(req);
+      const reason=String(b.reason||"");
+      ensure(b.confirm_node_id===node.id&&reason.trim()===reason&&
+        reason.length>=12&&reason.length<=280&&!/[\\x00-\\x1f\\x7f]/.test(reason),
+        "MANUAL_NODE_CONFIRMATION_REQUIRED",403);
+      const action=manualActions[sub];
+      ensure(isOnline(node),"NODE_OFFLINE",409);
+      ensure(/^[a-f0-9]{64}$/.test(node.config_revision),"POLICY_INSPECTION_REQUIRED",409);
+      const payload:Record<string,unknown>={
+        confirm_node_id:node.id,login_user:node.login_user,reason
+      };
+      if(action==="ssh.password.disable"){
+        ensure(node.init_stage==="KEY_VERIFIED","FRESH_VERIFIED_DAILY_LOGIN_REQUIRED",409);
+        const latest=await env.DB.prepare(
+          "SELECT v.id,v.proof_id,v.verified_at FROM ssh_verifications v "+
+          "JOIN public_keys k ON k.id=v.public_key_id AND k.purpose='daily' AND k.active=1 "+
+          "JOIN node_keys nk ON nk.node_id=v.node_id AND nk.public_key_id=k.id "+
+          "AND nk.login_user=v.login_user AND nk.purpose='daily' AND nk.state='installed' "+
+          "AND nk.verified_at IS NOT NULL "+
+          "WHERE v.node_id=? AND v.login_user=? AND v.config_revision=? "+
+          "AND v.status='VERIFIED' AND v.proof_id IS NOT NULL AND v.verified_at>? "+
+          "ORDER BY v.verified_at DESC LIMIT 1"
+        ).bind(node.id,node.login_user,node.config_revision,now()-1800)
+          .first<{id:string;proof_id:string;verified_at:number}>();
+        ensure(latest,"FRESH_VERIFIED_DAILY_LOGIN_REQUIRED",409);
+        payload.verification_id=latest.id;
+        payload.proof_id=latest.proof_id;
+      }else if(action==="ssh.password.restore"||action==="ssh.config.rollback"){
+        ensure(node.init_stage==="PASSWORD_DISABLED","PASSWORD_POLICY_NOT_MANAGED",409);
+        const snapshot=await env.DB.prepare(
+          "SELECT id,local_ref,revision FROM ssh_config_snapshots "+
+          "WHERE node_id=? AND restored_at IS NULL ORDER BY created_at DESC LIMIT 1"
+        ).bind(node.id).first<{id:string;local_ref:string;revision:string}>();
+        ensure(snapshot&&snapshot.revision===node.config_revision,"CONFIG_SNAPSHOT_STALE",409);
+        ensure(b.snapshot_ref===snapshot.local_ref,"MANUAL_SNAPSHOT_CONFIRMATION_REQUIRED",403);
+        payload.snapshot_ref=snapshot.local_ref;
+      }else if(action==="ssh.rescue.enable"){
+        const existing=await env.DB.prepare(
+          "SELECT id FROM node_keys WHERE node_id=? AND purpose='rescue' AND state='installed' LIMIT 1"
+        ).bind(node.id).first();
+        ensure(!existing,"RESCUE_KEY_ALREADY_ACTIVE_ON_NODE",409);
+        const key=await env.DB.prepare(
+          "SELECT id,public_key,fingerprint FROM public_keys WHERE purpose='rescue' AND active=1"
+        ).first<{id:string;public_key:string;fingerprint:string}>();
+        ensure(key,"RESCUE_PUBLIC_KEY_MISSING",409);
+        payload.key_id=key.id;payload.public_key=key.public_key;payload.fingerprint=key.fingerprint;
+      }else if(action==="ssh.rescue.revoke"){
+        const installed=await env.DB.prepare(
+          "SELECT nk.public_key_id AS id,k.public_key,k.fingerprint FROM node_keys nk "+
+          "JOIN public_keys k ON k.id=nk.public_key_id "+
+          "WHERE nk.node_id=? AND nk.purpose='rescue' AND nk.state='installed' LIMIT 1"
+        ).bind(node.id).first<{id:string;public_key:string;fingerprint:string}>();
+        ensure(installed,"RESCUE_KEY_NOT_ACTIVE_ON_NODE",409);
+        payload.key_id=installed.id;
+        payload.public_key=installed.public_key;
+        payload.fingerprint=installed.fingerprint;
+      }
+      return queueNodeOperation(req,env,a,node,action,payload);
     }
     if(sub==="snapshots"&&req.method==="GET"){
       needRole(a,"admin");const snapshots=await env.DB.prepare("SELECT * FROM ssh_config_snapshots WHERE node_id=? ORDER BY created_at DESC").bind(node.id).all();

@@ -6,5 +6,5 @@
   "assets":{"directory":"./apps/console/dist","binding":"ASSETS","run_worker_first":["/api/*"]},
   "d1_databases":[{"binding":"DB","database_name":"ssh-manager","database_id":"REPLACE_WITH_D1_UUID","migrations_dir":"packages/db/migrations"}],
   "durable_objects":{"bindings":[{"name":"NODE_SESSIONS","class_name":"NodeSession","script_name":"ssh-manager-agent-gateway"}]},
-  "vars":{"ACCESS_TEAM_DOMAIN":"REPLACE.cloudflareaccess.com","ACCESS_AUD":"REPLACE_ACCESS_APPLICATION_AUD","BOOTSTRAP_OWNER_EMAIL":"owner@example.com"}
+  "vars":{"ACCESS_TEAM_DOMAIN":"REPLACE.cloudflareaccess.com","ACCESS_AUD":"REPLACE_ACCESS_APPLICATION_AUD","BOOTSTRAP_OWNER_EMAIL":"owner@example.com","MANUAL_SSH_ACTIONS_ENABLED":"false"}
 }
