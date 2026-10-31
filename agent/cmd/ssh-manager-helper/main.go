@@ -23,6 +23,7 @@ import (
 const configPath="/etc/ssh-manager/helper.json"
 const socketPath="/run/ssh-manager/helper.sock"
 const journalPath="/var/lib/ssh-manager-root/operations"
+const challengePath="/var/lib/ssh-manager-root/challenges"
 
 func loadConfig()(sshhelper.Config,error){
  var c sshhelper.Config
@@ -103,7 +104,7 @@ func main(){
  if err=os.Chown(socketPath,0,gid);err!=nil{log.Fatal(err)}
  if err=os.Chmod(socketPath,0660);err!=nil{log.Fatal(err)}
  if err=os.MkdirAll(journalPath,0700);err!=nil{log.Fatal(err)}
- helper:=&sshhelper.Handler{Config:conf,Journal:&sshhelper.Journal{Directory:journalPath}}
+ helper:=&sshhelper.Handler{Config:conf,Journal:&sshhelper.Journal{Directory:journalPath},Challenges:&sshhelper.ChallengeStore{Directory:challengePath}}
  log.Printf("SSH Manager helper listening (node=%s, daily_install=%t)",conf.NodeID,conf.EnableDailyInstall)
  for{
   conn,err:=listener.AcceptUnix()

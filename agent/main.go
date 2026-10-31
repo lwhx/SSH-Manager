@@ -84,7 +84,7 @@ func (a *Agent) verify(s SignedCommand)(Command,error){
  if err=json.Unmarshal([]byte(s.Command),&c);err!=nil{return c,err}
  now:=time.Now().Unix()
  if c.NodeID!=a.config.NodeID||c.V!=1||!operationID.MatchString(c.ID)||c.IssuedAt>now+10||c.ExpiresAt<=now||c.ExpiresAt>c.IssuedAt+60 {return c,errors.New("invalid or expired command")}
- if c.Action!="node.preflight"&&c.Action!="node.status"&&c.Action!="ssh.daily.install"&&c.Action!="ssh.policy.inspect"{return c,errors.New("action not allowed")}
+ if c.Action!="node.preflight"&&c.Action!="node.status"&&c.Action!="ssh.daily.install"&&c.Action!="ssh.policy.inspect"&&c.Action!="ssh.verification.prepare"{return c,errors.New("action not allowed")}
  return c,nil
 }
 func report(a *Agent,ctx context.Context,id,status,code string,detail any){
@@ -98,7 +98,7 @@ func (a *Agent) handle(ctx context.Context,s SignedCommand){
   return
  }
  switch c.Action{
- case "ssh.daily.install","ssh.policy.inspect":
+ case "ssh.daily.install","ssh.policy.inspect","ssh.verification.prepare":
   result,err:=a.sendToLocalHelper(ctx,s)
   if err!=nil{
    report(a,ctx,c.ID,"FAILED","ROOT_HELPER_UNAVAILABLE",map[string]string{"reason":"local root helper not installed or unavailable"})

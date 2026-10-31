@@ -73,6 +73,7 @@ type Handler struct{
  Lookup AccountLookup
  Install KeyInstaller
  Journal *Journal
+ Challenges *ChallengeStore
  Clock func()time.Time
  EUID func()int
 }
@@ -115,7 +116,7 @@ func (h *Handler) Verify(s SignedCommand)(Command,error){
  if cmd.IssuedAt>epoch+10||cmd.ExpiresAt<=epoch||cmd.ExpiresAt<=cmd.IssuedAt||cmd.ExpiresAt>cmd.IssuedAt+60{
   return cmd,errors.New("stale or excessive TTL")
  }
- if cmd.Action!="ssh.policy.inspect"&&cmd.Action!="ssh.daily.install"{
+ if cmd.Action!="ssh.policy.inspect"&&cmd.Action!="ssh.daily.install"&&cmd.Action!="ssh.verification.prepare"{
   return cmd,errors.New("action denied")
  }
  if cmd.ExpectedRevision==""{return cmd,errors.New("missing expected config revision")}
@@ -146,6 +147,26 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)Result{
    "kbdinteractiveauthentication":p.KeyboardInteractive,
    "authorizedkeysfile":p.AuthorizedKeysFile,
    "verified_login":false,
+  }}
+ }
+ if cmd.Action=="ssh.verification.prepare"{
+  if cmd.ExpectedRevision!=p.Revision||cmd.ExpectedRevision=="unverified"{
+   return fail("POLICY_REVISION_MISMATCH",nil)
+  }
+  var prepared PreparedChallenge
+  if err=json.Unmarshal(cmd.Payload,&prepared);err!=nil{
+   return fail("INVALID_VERIFICATION_PREPARATION",err)
+  }
+  if err=prepared.Validate(h.Config.AllowedUser,p.Revision,h.Clock());err!=nil{
+   return fail("VERIFICATION_PREPARATION_REJECTED",err)
+  }
+  if h.Challenges==nil{return fail("CHALLENGE_STORE_UNAVAILABLE",nil)}
+  if err=h.Challenges.Save(prepared);err!=nil{
+   return fail("CHALLENGE_SAVE_FAILED",err)
+  }
+  // Local preparation is NOT a successful SSH login or configuration change.
+  return Result{OK:true,Code:"VERIFICATION_PREPARED",Detail:map[string]any{
+   "verification_id":prepared.VerificationID,"verified_login":false,
   }}
  }
  if !h.Config.EnableDailyInstall{return fail("DAILY_INSTALL_DISABLED",nil)}
