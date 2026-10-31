@@ -143,7 +143,10 @@ func run(ctx context.Context,path string)error {
  }
 }
 func pair(ctx context.Context,gateway,node,token,path string)error{
- if !strings.HasPrefix(gateway,"https://"){return errors.New("gateway must be HTTPS")}
+ preflight:=Config{Gateway:gateway,NodeID:node,StateDir:defaultAgentStateDir,
+  HelperSocket:defaultAgentHelperSocket}
+ if err:=normalizeAgentConfig(&preflight);err!=nil{return err}
+ if err:=validatePairingDestination(path);err!=nil{return err}
  _,private,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{return err}
  body,_:=json.Marshal(map[string]string{"node_id":node,"token":token,"public_key":encode(private.Public().(ed25519.PublicKey))})
  req,err:=http.NewRequestWithContext(ctx,"POST",strings.TrimRight(gateway,"/")+"/agent/v1/pair",bytes.NewReader(body));if err!=nil{return err}

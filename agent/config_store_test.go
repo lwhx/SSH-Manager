@@ -70,3 +70,15 @@ func TestRejectsWorldReadableAndSymlinkDeviceKeys(t *testing.T){
  if err:=os.Chmod(path,0644);err!=nil{t.Fatal(err)}
  if _,_,err:=readConfig(path);err==nil{t.Fatal("Agent read a world-readable private key")}
 }
+
+func TestPairingDestinationRejectedBeforeOneTimeTokenConsumption(t *testing.T){
+ c:=pairedTestConfig(t)
+ target:=filepath.Join(t.TempDir(),"agent.json")
+ if err:=validatePairingDestination(target);err!=nil{t.Fatal(err)}
+ if err:=savePairingConfig(target,c);err!=nil{t.Fatal(err)}
+ if err:=validatePairingDestination(target);err==nil{t.Fatal("existing secret target accepted")}
+ if err:=validatePairingDestination("../agent.json");err==nil{t.Fatal("relative path accepted")}
+ if err:=os.Chmod(filepath.Dir(target),0777);err!=nil{t.Fatal(err)}
+ alternate:=filepath.Join(filepath.Dir(target),"other.json")
+ if err:=validatePairingDestination(alternate);err==nil{t.Fatal("untrusted writable directory accepted")}
+}

@@ -4,6 +4,7 @@ import (
  "encoding/json"
  "errors"
  "fmt"
+ "io"
  "net/url"
  "os"
  "os/user"
@@ -35,6 +36,32 @@ func normalizeAgentConfig(c *Config)error{
   return errors.New("agent gateway must be an HTTPS origin without credentials or path")
  }
  if !operationID.MatchString(c.NodeID){return errors.New("invalid paired node ID")}
+ return nil
+}
+
+// Check the destination BEFORE consuming the one-time Cloudflare pairing
+// token. An unwritable or existing Agent config should not strand a device
+// pairing that can no longer be retried.
+func validatePairingDestination(path string)error{
+ if !filepath.IsAbs(path)||filepath.Clean(path)!=path||path=="/"{
+  return errors.New("paired Agent config needs a safe absolute filename")
+ }
+ if _,err:=os.Lstat(path);err==nil{
+  return errors.New("refusing to overwrite existing Agent device credentials")
+ }else if !os.IsNotExist(err){return err}
+ if path==standardAgentConfig{
+  if os.Geteuid()!=0{return errors.New("pair as root after provisioning ssh-manager service account")}
+  if _,err:=user.Lookup("ssh-manager");err!=nil{return fmt.Errorf("ssh-manager service account missing: %w",err)}
+ }
+ if stat,err:=os.Lstat(filepath.Dir(path));err==nil{
+  if !stat.IsDir()||stat.Mode().Perm()&0022!=0{
+   return errors.New("untrusted Agent config directory")
+  }
+  if path==standardAgentConfig{
+   owner,ok:=stat.Sys().(*syscall.Stat_t)
+   if !ok||owner.Uid!=0{return errors.New("standard Agent config directory must be root-owned")}
+  }
+ }else if !os.IsNotExist(err){return err}
  return nil
 }
 
@@ -103,11 +130,10 @@ func readAgentConfigBytes(path string)([]byte,error){
   owner.Uid!=uint32(os.Geteuid())||st.Size()>8192{
   return nil,errors.New("Agent device credential file must be a private, same-UID regular file")
  }
- b:=make([]byte,8193)
- n,err:=f.Read(b)
- if err!=nil&&n==0{return nil,err}
- if n>8192{return nil,errors.New("Agent credential file too large")}
- return b[:n],nil
+ b,err:=io.ReadAll(io.LimitReader(f,8193))
+ if err!=nil{return nil,err}
+ if len(b)>8192{return nil,errors.New("Agent credential file too large")}
+ return b,nil
 }
 
 // Ensure no secrets are accidentally written to startup logs.
