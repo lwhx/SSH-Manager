@@ -6,6 +6,7 @@ import (
  "encoding/json"
  "errors"
  "fmt"
+ "io"
  "os"
  "path/filepath"
  "regexp"
@@ -79,14 +80,17 @@ func (s *ChallengeStore)Read(id string)(PreparedChallenge,error){
  if err!=nil{return p,err}
  f:=os.NewFile(uintptr(fd),path);defer f.Close()
  stat,err:=f.Stat()
- if err!=nil||!stat.Mode().IsRegular()||stat.Mode().Perm()&0077!=0{
+ if err!=nil||!stat.Mode().IsRegular()||stat.Mode().Perm()&0077!=0||
+  stat.Size()>4096{
   return p,errors.New("unsafe local challenge file")
  }
- data:=make([]byte,4097)
- n,err:=f.Read(data)
- if err!=nil&&n==0{return p,err}
- if n==len(data){return p,errors.New("challenge file oversized")}
- if err=json.Unmarshal(data[:n],&p);err!=nil{return p,err}
+ owner,ok:=stat.Sys().(*syscall.Stat_t)
+ if !ok||owner.Uid!=uint32(os.Geteuid()){
+  return p,errors.New("local challenge file ownership mismatch")
+ }
+ data,err:=io.ReadAll(io.LimitReader(f,4097))
+ if err!=nil||len(data)>4096{return p,errors.New("invalid challenge file read")}
+ if err=json.Unmarshal(data,&p);err!=nil{return p,err}
  if p.VerificationID!=id{return PreparedChallenge{},errors.New("challenge storage mismatch")}
  return p,nil
 }
