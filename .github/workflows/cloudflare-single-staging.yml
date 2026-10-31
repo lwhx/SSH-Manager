@@ -1,0 +1,56 @@
+name: Deploy one Cloudflare Worker (Staging)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "packages/**"
+      - "wrangler.single.staging.example.jsonc"
+      - "scripts/cloudflare_ci_config.mjs"
+      - ".github/workflows/cloudflare-single-staging.yml"
+permissions:
+  contents: read
+concurrency:
+  group: ssh-manager-single-staging-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    # Default off. First create the signer with local npm run cf:quick.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.SSH_MANAGER_STAGING_AUTO_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    environment: cloudflare-staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SSH_MANAGER_STAGING_D1_UUID: ${{ vars.SSH_MANAGER_STAGING_D1_UUID }}
+      SSH_MANAGER_STAGING_CONTROL_HOSTNAME: ${{ vars.SSH_MANAGER_STAGING_CONTROL_HOSTNAME }}
+      SSH_MANAGER_STAGING_AGENT_HOSTNAME: ${{ vars.SSH_MANAGER_STAGING_AGENT_HOSTNAME }}
+      SSH_MANAGER_STAGING_ACCESS_TEAM_DOMAIN: ${{ vars.SSH_MANAGER_STAGING_ACCESS_TEAM_DOMAIN }}
+      SSH_MANAGER_STAGING_ACCESS_AUD: ${{ vars.SSH_MANAGER_STAGING_ACCESS_AUD }}
+      SSH_MANAGER_STAGING_OWNER_EMAIL: ${{ vars.SSH_MANAGER_STAGING_OWNER_EMAIL }}
+      SSH_MANAGER_STAGING_COMMAND_PUBLIC_KEY: ${{ vars.SSH_MANAGER_STAGING_COMMAND_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run check
+      - run: npm run test
+      - run: npm run test:cf:quick
+      - run: npm run build:web
+      - name: Render SAFE single-Worker Staging config
+        run: node scripts/cloudflare_ci_config.mjs render
+      - name: Require existing Cloudflare command signer (no rotation)
+        run: node scripts/cloudflare_ci_config.mjs verify-secret
+      - name: Apply Staging D1 migrations
+        run: npx wrangler d1 migrations apply ssh-manager-staging --remote --config wrangler.single.staging.ci.jsonc
+      - name: Deploy exactly ONE Worker
+        run: npx wrangler deploy --config wrangler.single.staging.ci.jsonc
+      - name: Validate both Custom Domains and security boundary
+        run: |
+          python3 scripts/staging_remote_probe.py \
+            --staging-only \
+            --control-url "https://$SSH_MANAGER_STAGING_CONTROL_HOSTNAME" \
+            --gateway-url "https://$SSH_MANAGER_STAGING_AGENT_HOSTNAME"

@@ -1,188 +1,79 @@
-# SSH Manager
+# SSH Manager V4
 
-基于 **Cloudflare Workers + D1 + Durable Objects + Go Agent** 的多 VPS SSH 密钥管理与紧急救援平台。
+基于 Cloudflare Workers、D1、Durable Objects 和 Linux Go Agent 的多 VPS SSH 密钥管理系统。
 
-> **开发状态：V4 P4/P5 功能代码已实现，P3.4 真实 Staging 验收尚未完成，不能用于生产。** P4 人工关闭密码登录、手动恢复/回滚及 P5 单 VPS 救援公钥已打通 Cloudflare → 签名命令 → Agent → Root Helper → 独立 Root 签名回执 → D1 事务；高危操作云端与本地开关默认全部关闭。**CI 通过不等于真实 VPS 验收**。
+**架构已调整为 1 个 Worker + 2 个自定义域名**。单 Worker 同时提供中文管理面板及 VPS Agent 通信，但二者通过精确 Host 隔离：
 
-## 产品约束
+| 入口 | 业务 | 安全验证 |
+|---|---|---|
+| Control 域名，例如 console.example.com | 中文 React 管理面板、/api/* | hostname-based Cloudflare Access + Worker Access JWT 验签 |
+| Agent 域名，例如 agent.example.com | 仅 /agent/v1/*（设备配对、WebSocket、命令和回执） | Agent Ed25519 设备签名 |
+| 共用 Cloudflare Worker | 一份 D1 + 同 Worker NodeSession Durable Object | 不再使用跨 Worker DO binding |
 
-- 两把不同公钥：日常公钥与救援公钥，绝不上传私钥。
-- Agent 首次连接后，必须先安装日常公钥并验证全新 SSH 公钥登录，才允许**人工**关闭密码登录。
-- 保存救援公钥不授权任何节点；只能在特定 VPS 页面人工启用。
-- 密码登录恢复、SSH 快照回滚都要求单节点、管理员手动发起。**永不自动回滚**。
-- Agent 不提供任意 shell 或 Web SSH；默认只读。所有 SSH 写操作需要特权 Helper 和实际 E2E 验收。
-- Agent 断线、重新上线或 SSH 登录失败，不执行过期危险操作。
-- 无法通过 Cloudflare / Agent 救援时使用 VPS 服务商控制台。
+两域名指向同一 Worker；管理域名不能访问 Agent API，Agent 域名不能访问管理 API 或任何 Web 静态文件。即便有人错配 Cloudflare Access，管理内容仍须通过 Worker 内置 JWT 校验。禁用 workers.dev、Preview URLs，设置 assets.run_worker_first=true，防止静态文件绕过路由。
 
-## 当前实现
+**Access 只能保护管理 hostname，不能开启 Worker-level Access**，否则 VPS Agent 的 WebSocket 会被拦截。
 
-| 模块 | 状态 |
-|---|---|
-| Cloudflare Workers 控制端 | 初版代码 |
-| Access JWT 校验、Owner 初始允许名单 | 初版代码，待真实 Access 验收 |
-| 中文 Web 面板 | 初版代码 |
-| D1 数据结构和版本化迁移 | 初版代码 |
-| 全局两种公钥保存（不自动安装） | 初版代码 |
-| Node 配对令牌与 Agent Ed25519 身份 | 初版代码 |
-| Agent WSS 长连接 + HTTPS 备用轮询与签名报告 | 初版代码 |
-| Durable Object WebSocket 投递 | 初版代码，Agent 已支持 WSS 与 HTTPS 双通道 |
-| Agent 命令验签、过期与白名单 | 初版代码 |
-| P3 安全 authorized_keys 本地模块 | **已接入可选 Root Helper，默认禁止写入，待 VPS 验收** |
-| P3 SSH 有效配置规则解析 | **已接入 Root Helper，须提供明确 SSH 来源 IP** |
-| Root-only Unix Socket Helper | **基础实现与单元测试，默认禁用日常公钥安装** |
-| Agent 日常公钥真正安装 | **具备本地显式 opt-in 路径，尚未真实 VPS 验收** |
-| 单节点 SSH 验证挑战 | **五分钟挑战签发/查询/撤销与测试已实现，可信证明尚未实现** |
-| 可信 SSH 登录证明 | **本地 Root 签名、Cloudflare 验签及 D1 事务已实现；等待真实 VPS E2E** |
-| 人工关闭密码登录 | **P4 代码/面板/签名回执已实现，双侧开关默认关闭；未通过实机验收** |
-| 单节点救援、密码恢复、配置快照回滚 | **P5 代码/面板/Root 签名回执已实现，默认关闭；未通过实机验收** |
+> 项目尚未完成 Cloudflare Staging + 真实 VPS P3.4 T01–T11 联调。当前代码可部署测试环境，不可视为生产 SSH 管理已验收。
 
-### 代码结构
+## 快捷部署（独立 Staging）
 
-- `apps/console/` React 中文面板
-- `apps/control-worker/` Access 认证与管理 API
-- `apps/agent-gateway/` Agent 网关与 Durable Object
-- `packages/db/migrations/` D1 迁移
-- `packages/protocol/` 签名协议与安全校验
-- `agent/` Go Agent（独立于 SSH daemon）
-- `docs/` 部署安全说明
-- `wrangler.*.jsonc` Cloudflare Worker 配置
+先在 Cloudflare Zero Trust 为 Control 域名配置 GitHub/Cloudflare 双身份、MFA 和 Owner Allow 策略，获取 Team Domain 与 Access Application AUD。准备两个当前 Cloudflare 账户管理的自定义域名。
 
-## 本地开发与部署前置
-
-依赖 Node.js 22+、Go 1.23+、Cloudflare 账户、Wrangler 权限、D1 与 Cloudflare Access 应用。云端资源、身份认证与密钥必须由部署者创建，不应写入仓库。
-
-```bash
-npm install
-npm run check
-npm run build:web
-cd agent && go test ./...
-```
-
-### Cloudflare 快捷部署（Staging）
-
-先在 Cloudflare Zero Trust 创建 Control 的 Access Application，配置 GitHub/Cloudflare 登录、Owner Allow 规则，取得 Team Domain 和 AUD。
-
-```bash
+~~~powershell
+git clone https://github.com/lwhx/SSH-Manager.git
+cd SSH-Manager
 npm install
 npx wrangler login
 npm run cf:quick
-```
+~~~
 
-首次创建/复用测试 D1，生成并上传 Ed25519 控制命令密钥，迁移数据库，并依序部署 Gateway 和 Control。以后运行同一命令保留原数据库与密钥。所有高危 SSH 修改默认锁定。详见 [Cloudflare 快捷部署指南](docs/CLOUDFLARE_QUICK_DEPLOY.md)。
+首次按提示填写两个域名、Team Domain、AUD、Owner 邮箱并确认 SINGLE-STAGING。脚本配置一个 Staging D1、一套命令签名密钥、一个 Worker 的本地 Durable Object，上传 Secret，自动构建中文界面。后续在同一目录执行：
 
-### Cloudflare 安装概览
+~~~powershell
+git pull --ff-only
+npm install
+npm run cf:quick
+~~~
 
-1. 创建一套 D1 数据库，分别在 `wrangler.control.jsonc` 和 `wrangler.gateway.jsonc` 填入真实 database_id。
-2. 为控制台设置 Access 应用并配置 GitHub、Cloudflare 两种 IdP 的允许名单。
-3. 创建**不同环境使用不同值**的命令 Ed25519 签名密钥对：控制 Worker 通过 Secret `COMMAND_PRIVATE_KEY` 使用 PKCS#8 DER base64；Gateway 的 `COMMAND_PUBLIC_KEY` 使用匹配的原始 32 字节 Ed25519 公钥 base64url。生产私钥绝不提交 Git。
-4. 配置控制 Worker 的 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`、`BOOTSTRAP_OWNER_EMAIL`。
-5. `npm run db:migrate:remote`，之后按顺序部署 Gateway 和 Control Worker。
-6. 将 Console 主机名绑定到 Access 保护范围，将 Agent 域名绑定到设备认证 Gateway。**Agent 网关必须不能被浏览器 Access 登录策略错误拦截。**
-7. 先在独立 Staging 环境做端到端认证与通信测试，不要接入任何真实生产 VPS。
+不会自动重新生成密钥、自动开启救援或修改 VPS。
 
-更多说明见 [部署须知](docs/DEPLOYMENT.md)。
+[单 Worker 快捷部署](docs/CLOUDFLARE_QUICK_DEPLOY.md) · [完整部署须知](docs/DEPLOYMENT.md) · [双 Worker 迁移指南](docs/MIGRATE_DUAL_TO_SINGLE.md) · [GitHub 自动部署（单 Worker）](docs/GITHUB_CLOUDFLARE_SINGLE_DEPLOY.md)
 
-## 单节点只读检查
+## 核心安全约束
 
-在 VPS 详情页可人工点击 **SSH 只读环境检查**。Agent 返回 OS、sshd 文件存在性、Agent 状态；**该结果不等于 SSH 认证规则有效，也不能作为关闭密码登录的依据**。任务实际状态可在页面查询。
+1. 只保存日常公钥和救援公钥；用户的 SSH 私钥不上传 Cloudflare/GitHub/Agent。
+2. VPS 上的 Go Agent 主动连接 Agent 域名，使用 Ed25519 身份签名，WebSocket 优先、HTTPS 备用。
+3. 必须先安装日常公钥，再由管理员本地新 SSH 会话验证；可信服务端 SSHD/journald 证据由 Root Helper 签名，Cloudflare 验证后更新 D1 VERIFIED。
+4. 只有管理员明确选择**单台 VPS**、输入完整 UUID 和原因，才能人工下发关闭密码登录、启用/撤销救援公钥、手动恢复和配置回滚命令。
+5. **永不自动回滚，不自动恢复密码登录，不批量下发救援公钥。**
 
-## Agent 配对
+云端 MANUAL_SSH_ACTIONS_ENABLED=false、VPS Root Helper 的全部 SSH 写入开关均默认 false。真实 Staging E2E 未完成之前不要对生产 VPS 开启。
 
-在 Web 面板中创建节点、获得 10 分钟的一次性配对令牌。构建 Agent：
+## 源代码目录
 
-```bash
-cd agent
-go build -o ssh-manager-agent .
-```
+- apps/single-worker/：单 Worker 路由入口与 Host 分流
+- apps/control-worker/：Access JWT、RBAC、管理 API
+- apps/agent-gateway/：Agent 配对、通信、Root 验签及 NodeSession
+- apps/console/：React 中文面板
+- packages/db/migrations/：D1 数据迁移
+- packages/protocol/：签名协议、可信证明
+- agent/：Go Agent + Root Helper
+- scripts/cloudflare_quick_deploy.mjs：单 Worker Staging 部署
 
-在 VPS 上通过受信任渠道安装已校验的二进制。配对：
+## 本地测试
 
-```bash
-read -rs TOKEN
-printf '%s\n' "$TOKEN" | sudo ./ssh-manager-agent -mode pair -gateway https://agent.example.com -node NODE_UUID -token-stdin -config /etc/ssh-manager/agent.json
-unset TOKEN
-```
+~~~bash
+npm install
+npm run check
+npm run test
+npm run test:cf:quick
+npm run cf:quick:dry
+npm run build:web
+node scripts/test_gateway_workerd.mjs --local-only
+cd agent && go test ./...
+~~~
 
-配对令牌通过标准输入传递，避免出现在 Shell 历史和进程列表。**必须在配对之前**建立专用 `ssh-manager` 服务账户，并确认 `/etc/ssh-manager` 目录为 `root:ssh-manager 0750`。标准路径的配对操作由 root 执行，它会创建 `ssh-manager:ssh-manager 0600` 的 `agent.json`；Agent 以相同 UID 读取私钥。Root Helper 配置独立保持 `root:root 0600`。**旧文档的 `root:ssh-manager 0640` 与运行时同 UID、0600 权限校验不兼容，禁止使用。**
+本地 CI 通过不等于云端 VPS 实机验收。相关文档：[P3.4 实机 Runbook](docs/P3_STAGING_LIVE_RUNBOOK.md)、[P4/P5 人工操作](docs/P4_P5_MANUAL_OPERATIONS.md)、[P6 上线门槛](docs/P6_RELEASE_AND_SECURITY_GATE.md)。
 
-**重要：** Root Helper 未配置时请求会失败；即使已配置，默认也会因为 `enable_daily_install=false` 而拒绝安装。只有在隔离测试 VPS 中经本机管理员显式开启、完成签名和配置版本检查后，才可能执行**追加日常公钥**，不会关闭密码登录。
-
-## 开发路线
-
-- P1：Cloudflare 基础、JWT 身份、D1、中文管理台
-- P2：Agent、配对、加密、实时通信与命令安全
-- P3.1：已实现独立 root-owned Helper、受控追加日常公钥及 SSH 生效配置检查；**待独立测试 VPS 真实验收**。P3.2/P3.3：补齐可信 SSH 新连接认证验证。
-- P4：手动关闭密码认证、Root 管理的配置片段及原子快照恢复 **代码已实现，等待 Staging 验收**。
-- P5：**只对选定 VPS** 启用/撤销救援公钥、手动恢复密码及配置回滚 **代码已实现，等待 Staging 验收**。
-- P6：发行物构建、安全交付说明和 CI 契约 **开发中**；发行版兼容性与生产上线验收仍未完成。
-
-所有高危步骤必须先通过隔离测试 VPS 的实际测试；未通过不得去掉安全锁。
-
-## 安全提示
-
-Cloudflare 控制面本身是高价值权限入口：需要 MFA、明确允许的管理员、分环境签名密钥。拥有签名密钥、修改 Worker 代码的权限相当于拥有远程节点管理能力。救援私钥应该离线保管。
-
-许可证待仓库所有者确定。
-
-## GitHub 与 Cloudflare Access 双身份绑定
-
-默认 Owner 第一次登录时使用部署引导邮箱绑定一个**经过 Access JWT 验证的 subject**。后续即使新 GitHub / Cloudflare 身份具有同一邮箱也**不会自动合并权限**。
-
-Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码；在另一个已通过 Cloudflare Access、尚未被 SSH Manager 授权的会话中粘贴该绑定码，系统校验相同邮箱、有效期及单次消费后绑定新身份。这样既支持两种登录方式，又防止仅凭邮箱提升权限。使用前需应用 `0002_identity_links.sql` 迁移。
-
-## P3.1 特权 Helper
-
-详情参阅 [P3 Helper 运行与安全验收指南](docs/P3_HELPER.md)。Root Helper 在 VPS 本地独立运行，重新验签并验证 Unix Socket UID，只接受 ssh.policy.inspect 及明确启用的 ssh.daily.install。默认禁用所有 SSH 写入操作，绝不自动修改密码登录方式。
-
-## P3.2 / P3.3 进度
-
-- P3.2：新增 GitHub Actions 临时 Runner 回环 SSH 真实登录验收。已验证正确日常私钥成功、错误私钥失败、原有密码认证配置不变；仍需独立 VPS 与 Cloudflare Staging 验收。
-- P3.3：Root Helper 的独立 Ed25519 签名 SSH 登录证明、Cloudflare 验签及五分钟挑战状态更新已实现。隔离 SSH、SQLite 与本地 workerd/D1 测试均已通过；真实 VPS + Cloudflare Staging 尚未完成。应用 0003–0005 全部迁移。
-
-## P3.3 当前安全边界
-
-已接通 Cloudflare 签名准备命令、单 VPS Agent、Root Helper 私有挑战存储、SO_PEERCRED 证明 Socket、Linux SSHD/journald 取证、Root 独立签名、Cloudflare 验签、D1 一次性 VERIFIED 及异常恢复。**准备完成仍不代表登录验证成功，只有完整可信签名证明经控制端验收才是 VERIFIED。** 真实 VPS + Cloudflare Staging 全链路联调仍待完成，P4 密码登录修改继续锁定。
-
-## P3.3 可信 Root 签名证明（Staging 原型）
-
-已实现会话内无特权 CLI `ssh-manager-prove`、Root 独立证明 Socket、只读 sshd/journald 认证检查、Root Ed25519 签名、Agent 安全转发、Owner 单节点证明公钥固定，以及 Cloudflare 一次性 VERIFIED 更新。**尚未通过真实 VPS + Cloudflare Staging E2E；P4 密码认证关闭依然锁定。** 见 [P3.3 隔离验收与 Windows PowerShell 验证指南](docs/P3_PROOF_END_TO_END.md)。需应用所有迁移，包括 0005。
-
-### P3.3 Staging 只读兼容性预检
-
-在独立隔离 VPS 上可运行 `sudo python3 scripts/staging_proof_preflight.py --staging-only`。不会修改 SSH 配置，输出受限目录权限、OpenSSH 策略、真实 journald 来源等 PASS/WARN/FAIL，**永不自行产生 VERIFIED**。进一步硬化：拒绝 journald stdout/stderr 的父进程 PID 归属，避免将另一 SSH 会话的成功认证误判为当前会话。
-
-## P3.3 Agent 配对权限与事务一致性加固
-
-已补齐 Agent 配对配置中固定的 Root Helper Socket、systemd StateDirectory，并限制服务账户私钥文件权限；旧配对配置可安全兼容缺失字段。Cloudflare Root 签名验证后的 VERIFIED、node stage、日常密钥时间及人工审计统一提交为一个 D1 事务。详细见 [隔离 Staging 验收清单](docs/P3_STAGING_DEPLOY_CHECKLIST.md)。此阶段不部署生产服务器，也不开放 P4。
-
-## P3.3 断网重试及死信队列
-
-Root Helper 签名证明和 Agent 操作结果分别持久化；只有 Cloudflare 明确返回的不可恢复错误才会进入相应的 root/Agent 私有隔离目录，保留原始证据并避免阻塞下一次验证。网络错误、未知 409 和延迟准备回执均不会自动删除。操作结果落盘后，Agent 重启可仅重发回执，不重执行 SSH 命令。见 [P3.3 断网恢复设计与安全边界](docs/P3_RELIABILITY.md)。真实 VPS + Cloudflare Staging E2E 仍未验收，P4 仍锁定。
-
-### P3.3 Root Helper 的可靠终态恢复
-
-Root Helper 执行签名命令后，先在 root-only 日志中持久化准确终态，再回复 Agent。Agent 崩溃重启仅通过只读 Socket 恢复已有结果并上报云端；只有领取记录但无终态时保留人工核查标记，绝不重执行 SSH 修改。详见 [断网恢复设计](docs/P3_RELIABILITY.md)。
-
-### P3.3 本地 workerd / D1 合约验收
-
-GitHub Actions 的 control job 运行 `node scripts/test_gateway_workerd.mjs --local-only`，通过真实本地 Worker + 临时 D1 验证 Agent Ed25519 请求签名、Root 证明验签、nonce 重放拒绝、PENDING→VERIFIED、幂等 ACK、事务审计及故障回滚。只监听本机回环地址，不连接远程 Cloudflare 或任何 VPS。**这不是正式 Cloudflare Staging / 真实 Linux SSHD 端到端验收**，P4 仍未开放。
-
-
-### P3.4 独立 Staging VPS 只读准入检查
-
-已新增 [只读 readiness 检查](scripts/staging_readiness.py) 和 [P3.4 Staging E2E 验收矩阵](docs/P3_STAGING_E2E_ACCEPTANCE.md)，要求显式提供当前选中的单台 VPS node UUID、登录用户、SSH 来源/本地 IP 与端口。检查 systemd 服务账户、私钥文件权限、Root Helper 的非敏感节点配置、Socket 属组/0660、可信 journald 和 OpenSSH 有效策略。退出码 0=全部 PASS、2=FAIL、3=仅 WARN；**不读取私钥、不更改 SSH，也不自行设为 VERIFIED**。CI 运行对应 9 项 Python 单元测试，且可信日志候选来源 IP 需要匹配本次指定的 SSH 客户端 IP。
-## P4/P5 单 VPS 人工操作（默认禁止）
-
-**此代码不得在 P3.4 T01–T11 实机验收完成前配置为可用。** P4/P5 路径已经包含独立 Owner 权限、完整节点 UUID 重输、原因和二次确认、短时签名指令、当前 SSH 配置 revision 绑定、Root Helper 本机显式许可、只允许操作当前选中的单 VPS、Root Ed25519 独立签名成功回执、Cloudflare 验签、D1 原子操作/节点/快照/救援状态审计。Agent 不拥有 Root 签名私钥，不能单独声称成功。
-
-### 全部默认关闭的开关
-
-- Cloudflare Control Worker：`MANUAL_SSH_ACTIONS_ENABLED=false`。
-- Root Helper：`enable_password_disable=false`、`enable_password_restore=false`、`enable_config_rollback=false`、`enable_rescue=false`。
-- Root 回执依赖 `enable_ssh_proof=true` 与已由 Owner 单节点固定的 Root 证明公钥，不允许绕过。
-
-只有在真正独立的 Staging 中通过 P3.4 才能另行审查是否启用，不应在生产 VPS 直接将全部开关改为 true。**永不因 SSH 失败、Agent 断连、超时而自动回滚。**
-
-P4 仅写入 OpenSSH 预先包含的 `/etc/ssh/sshd_config.d/00-ssh-manager.conf`；不覆盖管理员的 `sshd_config`。只有具备固定优先级的 Include、可验证的 `sshd -t/-T -C`、Root 私有快照及已通过的新 SSH 公钥登录证明才能继续。手动恢复/回滚只删除仍与原快照哈希一致的 SSH Manager 文件，不覆盖管理员后续修改。救援公钥仅人工单 VPS 安装/精准撤销，并且不做不可靠的定时自动撤销。
-
-详细操作与安全边界见 [P4/P5 人工操作说明](docs/P4_P5_MANUAL_OPERATIONS.md)，发行版测试与交付关卡见 [P6 发行安全门槛](docs/P6_RELEASE_AND_SECURITY_GATE.md)。
+许可证由仓库所有者确定。

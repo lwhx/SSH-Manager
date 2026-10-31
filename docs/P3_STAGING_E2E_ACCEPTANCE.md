@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | 主机范围 | 专门创建、可随时销毁的测试 VPS；保留云服务商 VNC/串行控制台 | 停止验收 |
 | 配对范围 | 每次测试只选择一个固定 node_id，不执行批量命令 | 停止验收 |
-| Cloudflare | 与生产环境分开的 Workers、DO、D1、Access audience、域名、签名密钥 | 停止验收 |
+| Cloudflare | 与生产环境分开的单 Worker、两个自定义域名、同 Worker NodeSession DO、D1、Control-only Access audience、签名密钥 | 停止验收 |
 | Agent | 非 root `ssh-manager` 运行；设备密钥仅自身可读 0600；只主动向外连接 | 停止验收 |
 | Root Helper | root 私有配置与证明私钥，组受控 Unix Socket，不监听外网管理端口 | 停止验收 |
 | 日常公钥 | 由本地管理员授权安装到该测试 VPS 的特定登录用户，不覆盖现有条目 | 停止验收 |
@@ -45,7 +45,7 @@ sudo python3 scripts/staging_readiness.py \
 
 | 序号 | 操作 | 验收证据 | 失败处理 |
 | --- | --- | --- | --- |
-| T01 | Cloudflare Staging 部署与 D1 迁移 | 不含任何 Secret 的迁移记录、Worker 版本、D1 环境标识 | 不进入 VPS 阶段 |
+| T01 | 单 Worker + 双域名 Cloudflare Staging 部署、Access Host 隔离与 D1 迁移 | 不含任何 Secret 的迁移记录、Worker 版本、D1 环境标识 | 不进入 VPS 阶段 |
 | T02 | 单节点 Agent 配对 | D1 节点 ID 与 Agent UID/服务状态，配对 token 已消费 | 只检查当前 VPS，不重用一次性 token |
 | T03 | Root Helper 准备挑战 | Root 私有 challenge 记录及控制端 `prepared_at`，不得为 VERIFIED | 只读排查本机日志 |
 | T04 | Windows PowerShell 新建纯公钥 SSH 连接 | `BatchMode=yes`、禁密码/键盘交互、HostKeyChecking=yes、连接不复用 | 禁止用密码或旧连接补齐证据 |
@@ -90,3 +90,7 @@ P3.4 现在增加两个仅用于隔离 Staging 的执行入口：
 2. docs/P3_STAGING_LIVE_RUNBOOK.md：固定 Cloudflare Staging、单 VPS、Root Helper、Windows 新 SSH 会话和 D1 VERIFIED 的完整执行顺序。
 
 这两个入口只让 T01–T11 可重复执行，不会把任何条目标记为已通过。真实环境没有留存证据前，本文件的当前状态仍是“待验收”。
+
+## 单 Worker 双域名的特殊安全门槛
+
+管理域名必须仅经过 hostname-based Access；不能对 Worker 整体配置 Access，否则 Agent WebSocket 会被阻断。Agent 域名不能路由到 /api/*、/、/index.html。Worker 静态资源必须 run_worker_first=true，禁用 workers.dev 和 preview URLs。单 Worker 上报本地 CI PASS 仍不等于云端路由隔离已验收。

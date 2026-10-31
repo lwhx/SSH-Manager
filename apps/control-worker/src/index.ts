@@ -20,7 +20,7 @@ async function bodyJSON(req:Request):Promise<Record<string,unknown>> {
   return obj as Record<string,unknown>;
 }
 interface AccessIdentity {subject:string;email:string;}
-async function verifiedAccess(req:Request,env:Env):Promise<AccessIdentity>{
+export async function verifyControlAccess(req:Request,env:Env):Promise<AccessIdentity>{
   ensure(env.ACCESS_TEAM_DOMAIN&&env.ACCESS_AUD&&env.BOOTSTRAP_OWNER_EMAIL,"ACCESS_NOT_CONFIGURED",503);
   const jwt=req.headers.get("Cf-Access-Jwt-Assertion");
   ensure(jwt,"UNAUTHORIZED",401);
@@ -39,7 +39,7 @@ async function verifiedAccess(req:Request,env:Env):Promise<AccessIdentity>{
   return {subject,email};
 }
 async function actor(req:Request,env:Env):Promise<Actor>{
-  const {subject,email}=await verifiedAccess(req,env);
+  const {subject,email}=await verifyControlAccess(req,env);
   let identity=await env.DB.prepare(
     "SELECT u.id,u.email,u.role,u.status FROM user_identities i JOIN users u ON i.user_id=u.id WHERE i.subject=?"
   ).bind(subject).first<{id:string;email:string;role:string;status:string}>();
@@ -62,7 +62,7 @@ async function actor(req:Request,env:Env):Promise<Actor>{
 async function claimIdentity(req:Request,env:Env):Promise<Response>{
   // Deliberately available to Access-verified users WITHOUT an SSH Manager
   // membership, but only with a one-time Owner-issued 256-bit linking token.
-  const identity=await verifiedAccess(req,env), b=await bodyJSON(req);
+  const identity=await verifyControlAccess(req,env), b=await bodyJSON(req);
   const token=String(b.token||"");
   ensure(/^[a-zA-Z0-9_-]{40,64}$/.test(token),"INVALID_LINK_TOKEN",403);
   const tokenHash=await sha256hex(token),t=now();

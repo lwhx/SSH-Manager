@@ -32,6 +32,7 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p test_staging_remote_probe.py
       - run: npm run test
       - run: npm run test:cf:quick
+      - run: node --test scripts/test_cloudflare_ci_config.mjs
       - run: npm run cf:quick:dry
-      - run: node scripts/test_gateway_workerd.mjs --local-only
       - run: npm run build:web
+      - run: node scripts/test_gateway_workerd.mjs --local-only

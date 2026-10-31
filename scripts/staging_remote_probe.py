@@ -156,6 +156,17 @@ def evaluate_gateway(result: dict[str, Any]) -> tuple[str, str]:
     return "PASS", "Agent Gateway is directly reachable and advertises device-signature authentication"
 
 
+def evaluate_agent_admin_isolation(result: dict[str, Any]) -> tuple[str, str]:
+    status = int(result.get("status", 0))
+    if status == 404:
+        return "PASS", "Agent hostname refuses management API or website resources"
+    return "FAIL", (
+        "Agent hostname exposed a management or static asset route"
+        if status == 200
+        else f"Agent hostname boundary returned HTTP {status}; expected 404"
+    )
+
+
 def run(control_origin: str, gateway_origin: str) -> tuple[dict[str, Any], int]:
     checks: list[dict[str, str]] = []
 
@@ -179,6 +190,15 @@ def run(control_origin: str, gateway_origin: str) -> tuple[dict[str, Any], int]:
     gateway_result = request_once(gateway_origin + "/agent/v1/health")
     status, detail = evaluate_gateway(gateway_result)
     add("agent_gateway_boundary", status, detail)
+
+    for section, resource in (
+        ("agent_rejects_management_api", "/api/v1/health"),
+        ("agent_rejects_spa_root", "/"),
+        ("agent_rejects_static_assets", "/index.html"),
+    ):
+        result = request_once(gateway_origin + resource)
+        status, detail = evaluate_agent_admin_isolation(result)
+        add(section, status, detail)
 
     fail_count = sum(x["status"] == "FAIL" for x in checks)
     warn_count = sum(x["status"] == "WARN" for x in checks)

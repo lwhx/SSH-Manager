@@ -85,6 +85,14 @@ class StagingRemoteProbeTests(unittest.TestCase):
         )
         self.assertEqual(status, "FAIL")
 
+    def test_agent_hostname_rejects_admin_api_and_static_files(self):
+        for route_result in (result(404),):
+            outcome, _ = probe.evaluate_agent_admin_isolation(route_result)
+            self.assertEqual(outcome, "PASS")
+        for code in (200, 302, 401, 403, 500):
+            outcome, _ = probe.evaluate_agent_admin_isolation(result(code))
+            self.assertEqual(outcome, "FAIL")
+
     def test_access_redirect_rejects_non_https_absolute_url(self):
         self.assertFalse(probe.access_redirect("http://example.com/cdn-cgi/access/login"))
 
