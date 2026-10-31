@@ -16,7 +16,8 @@ import {
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
 const TEMPLATE=join(ROOT,"wrangler.single.staging.example.jsonc");
-const CONFIG=join(ROOT,".ssh-manager-deploy","native-build.jsonc");
+// Wrangler resolves relative entry and assets paths against this config's directory.
+const CONFIG=join(ROOT,"wrangler.single.staging.native.jsonc");
 const NAME="ssh-manager-staging";
 const DB="ssh-manager-staging";
 
@@ -100,6 +101,8 @@ function buildAssets(){
 }
 async function main(){
  if(process.argv.length!==2)throw Error("Run: npm run cf:deploy (no arguments)");
+ const branch=process.env.WORKERS_CI_BRANCH||process.env.GITHUB_REF_NAME;
+ if(branch&&branch!=="main")throw Error("Refusing to deploy Staging from a non-main branch.");
  const id=accountId();
  console.log("[1/4] Reading verified settings from existing Cloudflare staging Worker...");
  const original=await settings(id);

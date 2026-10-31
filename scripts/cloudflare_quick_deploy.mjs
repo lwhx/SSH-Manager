@@ -7,7 +7,7 @@ import {dirname,join,resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import {createInterface} from "node:readline/promises";
 import {
- accessSettings,customDomain,buildSingleConfig,findStagingDatabase,
+ accessSettings,customDomain,deriveAgentHostname,buildSingleConfig,findStagingDatabase,
  generateCommandSigner,validateStoredConfig
 } from "./cloudflare_quick_lib.mjs";
 
@@ -101,20 +101,20 @@ async function prompts(){
  try{
   console.log("\nBefore proceeding, create a Cloudflare Access Self-hosted Application "+
    "for the CONTROL CUSTOM DOMAIN only, with a strict GitHub/Cloudflare Allow policy and MFA.");
+  const controlHost=customDomain(process.env.SSH_MANAGER_CONTROL_HOSTNAME||
+   await io.question("Control hostname protected by Access (e.g. ssh.whks.de): "));
+  const agentHost=customDomain(process.env.SSH_MANAGER_AGENT_HOSTNAME||
+   deriveAgentHostname(controlHost));
+  console.log("Agent hostname (automatic): "+agentHost);
   const input={
-   controlHost:process.env.SSH_MANAGER_CONTROL_HOSTNAME||
-    await io.question("Control hostname in your Cloudflare zone (e.g. console-staging.example.com): "),
-   agentHost:process.env.SSH_MANAGER_AGENT_HOSTNAME||
-    await io.question("Agent hostname in your Cloudflare zone (e.g. agent-staging.example.com): "),
+   controlHost,agentHost,
    team:process.env.SSH_MANAGER_ACCESS_TEAM_DOMAIN||
-    await io.question("Access team (myteam.cloudflareaccess.com): "),
+    await io.question("Access Team Domain (myteam.cloudflareaccess.com): "),
    aud:process.env.SSH_MANAGER_ACCESS_AUD||
     await io.question("Control Access Application AUD: "),
    owner:process.env.SSH_MANAGER_OWNER_EMAIL||
     await io.question("Initial Owner email: ")
   };
-  const controlHost=customDomain(input.controlHost);
-  const agentHost=customDomain(input.agentHost);
   if(controlHost===agentHost)throw Error("Control and Agent domains must differ");
   const access=accessSettings(input);
   console.log("\nWorker custom domains: "+controlHost+" (Access), "+agentHost+" (signed devices).");
@@ -219,7 +219,7 @@ async function main(){
  if(args.some(x=>!["--help","--dry-run"].includes(x)))throw Error("Supported: --help, --dry-run");
  if(args.includes("--help")){
   console.log("npm install && npx wrangler login && npm run cf:quick");
-  console.log("Requires two Custom Domains within your Cloudflare zone and a Control-only Access app.");
+  console.log("Input Control hostname once; derive Agent hostname. Control-only Access is mandatory.");
   console.log("Repeat for updates without rotating signer. --dry-run is offline.");
   return;
  }

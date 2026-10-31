@@ -14,7 +14,10 @@
     "cf:quick": "node scripts/cloudflare_quick_deploy.mjs",
     "cf:quick:dry": "node scripts/cloudflare_quick_deploy.mjs --dry-run",
     "test:cf:quick": "node --test scripts/test_cloudflare_quick_deploy.mjs",
-    "deploy:single": "wrangler deploy --config wrangler.single.staging.local.jsonc"
+    "deploy:single": "wrangler deploy --config wrangler.single.staging.local.jsonc",
+    "cf:deploy": "node scripts/cloudflare_native_deploy.mjs",
+    "cf:preview:skip": "node -e \"console.log('Preview deployment disabled for SSH Manager')\"",
+    "test:cf:native": "node --test scripts/test_cloudflare_native_lib.mjs"
   },
   "dependencies": {
     "jose": "^6.1.0",
