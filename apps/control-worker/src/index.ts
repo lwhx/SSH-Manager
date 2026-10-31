@@ -1,4 +1,5 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
+import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,signCommand} from "../../../packages/protocol/src/index";
 
 interface Env {
@@ -206,6 +207,88 @@ async function handle(req:Request,env:Env):Promise<Response>{
       return queueNodeOperation(req,env,a,node,"ssh.daily.install",
         {login_user:node.login_user,public_key:key.public_key,key_id:key.id,fingerprint:key.fingerprint});
     }
+    if(sub==="ssh-verification/start"&&req.method==="POST"){
+      needRole(a,"admin");
+      const key=await env.DB.prepare(
+        "SELECT id,fingerprint FROM public_keys WHERE purpose='daily' AND active=1"
+      ).first<{id:string;fingerprint:string}>();
+      ensure(key,"DAILY_KEY_MISSING",409);
+      const installed=await env.DB.prepare(
+        "SELECT public_key_id,login_user FROM node_keys WHERE node_id=? AND purpose='daily' AND state='installed' "+
+        "ORDER BY rowid DESC LIMIT 1"
+      ).bind(node.id).first<{public_key_id:string;login_user:string}>();
+      const completed=await env.DB.prepare(
+        "SELECT command_json FROM operations WHERE node_id=? AND action='ssh.daily.install' AND status='SUCCEEDED' "+
+        "ORDER BY finished_at DESC LIMIT 1"
+      ).bind(node.id).first<{command_json:string}>();
+      let last:{expected_revision?:string;payload?:{key_id?:string;login_user?:string}}={};
+      if(completed){
+        try{last=JSON.parse(completed.command_json);}catch{throw new ApiError("INSTALL_RECORD_CORRUPT",409);}
+      }
+      const blocker=verificationBlocker({
+        nodeOnline:isOnline(node),stage:node.init_stage,nodeRevision:node.config_revision,targetUser:node.login_user,
+        activeKeyId:key.id,installedKeyId:installed?.public_key_id||"",installedKeyUser:installed?.login_user||"",
+        lastInstallRevision:last.expected_revision||"",lastInstallKeyId:last.payload?.key_id||"",lastInstallUser:last.payload?.login_user||""
+      });
+      ensure(!blocker,blocker||"NOT_READY",409);
+      const t=now();
+      await env.DB.prepare(
+        "UPDATE ssh_verifications SET status='EXPIRED' WHERE node_id=? AND status='PENDING' AND expires_at<=?"
+      ).bind(node.id,t).run();
+      const active=await env.DB.prepare(
+        "SELECT id FROM ssh_verifications WHERE node_id=? AND status='PENDING' LIMIT 1"
+      ).bind(node.id).first();
+      ensure(!active,"VERIFICATION_ALREADY_PENDING",409);
+      const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
+      const nonceHash=await sha256hex(token),id=crypto.randomUUID(),expires=t+VERIFICATION_TTL_SECONDS;
+      await env.DB.prepare(
+        "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,config_revision,nonce_hash,status,"+
+        "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?,?)"
+      ).bind(id,node.id,key.fingerprint,node.login_user,node.config_revision,nonceHash,t,expires,key.id,a.id).run();
+      await audit(env,a,node.id,"ssh.verification.start","PENDING",null,id);
+      // No endpoint currently trusts a browser-issued 'verified' claim.
+      // The nonce is returned once and NEVER stored as plaintext in D1.
+      return response({verification_id:id,token,expires_at:expires,login_user:node.login_user,
+        fingerprint:key.fingerprint,status:"PENDING",trusted_proof_available:false},201);
+    }
+    const verificationMatch=/^ssh-verification\/([0-9a-f-]{36})(?:\/cancel)?$/.exec(sub);
+    if(verificationMatch){
+      needRole(a,"admin");
+      const verification=await env.DB.prepare(
+        "SELECT id,node_id,login_user,key_fingerprint,config_revision,status,created_at,expires_at,verified_at,public_key_id "+
+        "FROM ssh_verifications WHERE id=? AND node_id=?"
+      ).bind(verificationMatch[1],node.id).first<any>();
+      ensure(verification,"VERIFICATION_NOT_FOUND",404);
+      if(verification.status==="PENDING"&&verification.expires_at<=now()){
+        await env.DB.prepare("UPDATE ssh_verifications SET status='EXPIRED' WHERE id=? AND status='PENDING'").bind(verification.id).run();
+        verification.status="EXPIRED";
+      }
+      if(sub.endsWith("/cancel")&&req.method==="POST"){
+        ensure(verification.status==="PENDING","VERIFICATION_NOT_PENDING",409);
+        await env.DB.prepare(
+          "UPDATE ssh_verifications SET status='CANCELLED',invalidated_at=? WHERE id=? AND status='PENDING'"
+        ).bind(now(),verification.id).run();
+        await audit(env,a,node.id,"ssh.verification.cancel","CANCELLED",null,verification.id);
+        return response({verification_id:verification.id,status:"CANCELLED"});
+      }
+      if(req.method==="GET"){
+        const activeKey=await env.DB.prepare(
+          "SELECT id FROM public_keys WHERE purpose='daily' AND active=1"
+        ).first<{id:string}>();
+        if(verification.status==="PENDING"&&
+           (verification.config_revision!==node.config_revision||
+            verification.public_key_id!==activeKey?.id)){
+          await env.DB.prepare(
+            "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE id=? AND status='PENDING'"
+          ).bind(now(),verification.id).run();
+          verification.status="INVALIDATED";
+        }
+        // Never send nonce_hash or any credentials back from a read endpoint.
+        return response({verification:{...verification,
+          status:verificationStatus(verification.status,verification.expires_at,now())},
+          trusted_proof_available:false});
+      }
+    }
     if(sub==="snapshots"&&req.method==="GET"){
       needRole(a,"admin");const snapshots=await env.DB.prepare("SELECT * FROM ssh_config_snapshots WHERE node_id=? ORDER BY created_at DESC").bind(node.id).all();
       return response({snapshots:snapshots.results});
@@ -229,10 +312,19 @@ async function handle(req:Request,env:Env):Promise<Response>{
     const purpose=keyMatch[1],version=Number((await env.DB.prepare("SELECT max(version) AS v FROM public_keys WHERE purpose=?").bind(purpose).first<{v:number|null}>())?.v||0)+1;
     const id=crypto.randomUUID(),name=String(b.name||purpose).slice(0,80);
     // A D1 batch is transactional; changing global settings NEVER installs keys.
-    await env.DB.batch([
+    const changes=[
       env.DB.prepare("UPDATE public_keys SET active=0 WHERE purpose=?").bind(purpose),
-      env.DB.prepare("INSERT INTO public_keys(id,purpose,name,algorithm,public_key,fingerprint,version,active,created_by,created_at) VALUES (?,?,?,?,?,?,?,1,?,?)").bind(id,purpose,name,key.algorithm,key.normalized,key.fingerprint,version,a.id,now())
-    ]);
+      env.DB.prepare("INSERT INTO public_keys(id,purpose,name,algorithm,public_key,fingerprint,version,active,created_by,created_at) VALUES (?,?,?,?,?,?,?,1,?,?)")
+        .bind(id,purpose,name,key.algorithm,key.normalized,key.fingerprint,version,a.id,now())
+    ];
+    // Rotating the global daily key revokes any previously issued verification
+    // challenge, without modifying keys on the actual VPS.
+    if(purpose==="daily"){
+      changes.push(env.DB.prepare(
+        "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE status='PENDING'"
+      ).bind(now()));
+    }
+    await env.DB.batch(changes);
     await audit(env,a,null,"keys."+purpose+".update","ok");
     return response({id,purpose,fingerprint:key.fingerprint,version,installed_nodes:0});
   }
