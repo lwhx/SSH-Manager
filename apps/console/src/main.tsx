@@ -5,7 +5,7 @@ type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:
 type KeyInfo={id:string;purpose:string;fingerprint:string;public_key:string;version:number;name:string};
 async function api<T>(path:string,method="GET",data?:unknown,headers?:Record<string,string>):Promise<T>{
  const res=await fetch("/api/v1"+path,{method,headers:{"Content-Type":"application/json",...headers},body:data?JSON.stringify(data):undefined,credentials:"same-origin"});
- const result=await res.json();
+ const result:any=await res.json();
  if(!res.ok)throw new Error(result.error||"REQUEST_FAILED");return result;
 }
 function App(){
