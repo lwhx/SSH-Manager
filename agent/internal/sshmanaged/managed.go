@@ -109,8 +109,40 @@ func (m *Manager) paths()(string,[]byte,error){
   break
  }
  if !found{return "",nil,errors.New("first sshd_config directive must include the managed drop-in glob")}
+ // For global password-auth claims, reject Match blocks and nested Include
+ // directives in the main file and loaded drop-ins. A single -T -C sample
+ // must never be mistaken for proof of the policy for all SSH users/addresses.
+ if err:=ensureUnconditional(string(main),true,expected);err!=nil{return "",nil,err}
+ candidates,err:=filepath.Glob(expected)
+ if err!=nil||len(candidates)>128{return "",nil,errors.New("unsupported SSH include glob")}
+ for _,candidate:=range candidates{
+  body,err:=safeRead(candidate,256*1024)
+  if err!=nil{return "",nil,err}
+  if err:=ensureUnconditional(string(body),false,expected);err!=nil{return "",nil,err}
+ }
  if _,err:=secureMeta(m.SnapshotDir,true);err!=nil{return "",nil,err}
  return dir,main,nil
+}
+
+// ensureUnconditional refuses configurations that could override our global
+// password change for another Match user/address. No automatic configuration
+// rewriting is attempted; an administrator must review such deployments.
+func ensureUnconditional(contents string,main bool,glob string)error{
+ first:=true
+ for _,line:=range strings.Split(contents,"\n"){
+  words:=strings.Fields(line)
+  if len(words)==0||strings.HasPrefix(words[0],"#"){continue}
+  if strings.EqualFold(words[0],"Match"){
+   return errors.New("Match contexts are not supported by globally managed password policy")
+  }
+  if strings.EqualFold(words[0],"Include"){
+   if !main||!first||len(words)!=2||words[1]!=glob{
+    return errors.New("nested or out-of-order OpenSSH Include cannot be proven safe")
+   }
+  }
+  first=false
+ }
+ return nil
 }
 func (m *Manager) readManifest(ref,node,user string)(Manifest,error){
  var value Manifest

@@ -70,3 +70,16 @@ func TestRejectUnsafeMainIncludeAndSymlink(t *testing.T){
  if err:=os.Symlink(filepath.Join(filepath.Dir(m.MainPath),"other"),m.MainPath);err!=nil{t.Fatal(err)}
  if _,err:=m.Disable(context.Background(),node,"root",before);err==nil{t.Fatal("symlink main accepted")}
 }
+
+func TestManagedPolicyRejectsMatchBlocksAndNestedIncludes(t *testing.T){
+ m,disabled,_:=fixture(t)
+ before,_:=m.Inspect(context.Background());*disabled=true
+ path:=filepath.Join(filepath.Dir(m.DropinPath),"70-special.conf")
+ if err:=os.WriteFile(path,[]byte("Match User other\nPasswordAuthentication yes\n"),0600);err!=nil{t.Fatal(err)}
+ if _,err:=m.Disable(context.Background(),node,"root",before);err==nil{
+  t.Fatal("Match password exception was allowed")
+ }
+ if _,err:=os.Stat(m.DropinPath);!os.IsNotExist(err){t.Fatal("SSH drop-in changed despite unsafe Match")}
+ if err:=os.WriteFile(path,[]byte("Include /etc/ssh/extra.conf\n"),0600);err!=nil{t.Fatal(err)}
+ if _,err:=m.Disable(context.Background(),node,"root",before);err==nil{t.Fatal("nested Include accepted")}
+}

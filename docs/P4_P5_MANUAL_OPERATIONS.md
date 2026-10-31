@@ -26,6 +26,7 @@
 - 按单节点实际 IP/端口核对 sshd 策略：公钥认证生效，默认 AuthorizedKeysFile，Match 规则没有让检查路径失效。
 - Root Helper enable_password_disable=true，Root 独立签名私钥已固定。其他 enable_* 不因本次操作自动打开。
 - 主 sshd_config 第一条有效配置必须是 Include /etc/ssh/sshd_config.d/*.conf；没有该精确 Include 不得自动修改原配置来适配。
+- 为避免“只对选中用户检查通过，却有其他 Match 用户/地址仍能密码登录”，此保守版本会拒绝主配置与所加载 drop-in 中的所有 Match 条件以及嵌套 Include。需要复杂 Match 策略的主机暂不支持自动化全局密码变更。
 - /etc/ssh/sshd_config.d 是 root 控制的不可被普通用户写入的真实目录；SSH Manager 的 00-ssh-manager.conf 不得已被管理员创建或修改。
 
 Root Manager 执行：先以 root-only 的不可覆盖 Manifest 保存初始 sshd_config 哈希、SSH 有效策略版本、禁用后文件 SHA256 和一次性 snapshot_ref；再原子创建自己管理的 drop-in，仅设置 PasswordAuthentication no、KbdInteractiveAuthentication no；验证 sshd -t/-T -C 的真实有效设置均为 no 且公钥仍允许，最后请求 systemd reload ssh/sshd。
