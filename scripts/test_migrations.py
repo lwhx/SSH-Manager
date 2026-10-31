@@ -63,7 +63,56 @@ def run() -> None:
     assert db.execute(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='identity_link_tokens'"
     ).fetchone()[0] == 1
-    print("PASS: migrations, foreign keys, verification deduplication and expiry")
+    # Owner-pinned root proof public key: Agent can never create this record.
+    db.execute(
+        "INSERT INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at)"
+        " VALUES (?,?,?,?,?)",
+        (node, "base64url-root-public", "SHA256:owner-confirmed", user, 90),
+    )
+    verification_id = "30000000-0000-4000-8000-000000000002"
+    revision = "a" * 64
+    db.execute(
+        "UPDATE nodes SET config_revision=?, init_stage='WAITING_VERIFICATION' WHERE id=?",
+        (revision, node),
+    )
+    db.execute(
+        "UPDATE ssh_verifications SET prepared_at=? WHERE id=? AND status='PENDING'",
+        (100, verification_id),
+    )
+    # Mirrors Gateway's guarded, single-use state transition. A second proof
+    # MUST NOT update VERIFIED again, even with otherwise identical evidence.
+    verification_sql = (
+        "UPDATE ssh_verifications SET status='VERIFIED',verified_at=?,proof_id=?,proof_hash=? "
+        "WHERE id=? AND node_id=? AND status='PENDING' AND prepared_at IS NOT NULL "
+        "AND expires_at>? AND nonce_hash=? AND login_user=? AND key_fingerprint=? "
+        "AND config_revision=? AND public_key_id=? "
+        "AND EXISTS (SELECT 1 FROM nodes WHERE id=? AND login_user=? AND config_revision=? "
+        "AND init_stage='WAITING_VERIFICATION') "
+        "AND EXISTS (SELECT 1 FROM public_keys WHERE id=? AND purpose='daily' AND active=1)"
+    )
+    arguments = (
+        150, "40000000-0000-4000-8000-000000000001", "proof-hash",
+        verification_id, node, 150, "hash-only", "root", "SHA256:test",
+        revision, key, node, "root", revision, key,
+    )
+    result = db.execute(verification_sql, arguments)
+    assert result.rowcount == 1, "valid, prepared proof failed conditional verification"
+    assert db.execute(verification_sql, arguments).rowcount == 0, "proof replay accepted"
+    assert db.execute(
+        "SELECT status,proof_id FROM ssh_verifications WHERE id=?", (verification_id,)
+    ).fetchone() == ("VERIFIED", arguments[1])
+    # Never count a stale key or an unprepared record as verified.
+    db.execute(
+        "UPDATE ssh_verifications SET status='PENDING',prepared_at=NULL,verified_at=NULL "
+        "WHERE id=?", (verification_id,)
+    )
+    assert db.execute(verification_sql, arguments).rowcount == 0, "unprepared proof accepted"
+    db.execute(
+        "UPDATE ssh_verifications SET prepared_at=100 WHERE id=?", (verification_id,)
+    )
+    invalid_key = (*arguments[:-1], "wrong-daily-key")
+    assert db.execute(verification_sql, invalid_key).rowcount == 0, "inactive daily key accepted"
+    print("PASS: migrations, guarded root proof, expired challenge and replay rejection")
 
 
 if __name__ == "__main__":
