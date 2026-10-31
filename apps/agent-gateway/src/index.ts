@@ -188,8 +188,29 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     const b=await jsonBody(req);
     const opId=String(b.operation_id||""),status=String(b.status||"");
     must(validNodeId(opId)&&["RUNNING","SUCCEEDED","FAILED"].includes(status),"INVALID_REPORT");
-    const op=await env.DB.prepare("SELECT id,action,status,operator_id,command_json FROM operations WHERE id=? AND node_id=?").bind(opId,id).first<any>();
+    const op=await env.DB.prepare(
+      "SELECT id,action,status,operator_id,command_json,result_code,detail "+
+      "FROM operations WHERE id=? AND node_id=?"
+    ).bind(opId,id).first<any>();
     must(op,"OPERATION_NOT_FOUND",404);
+    const reportedCode=String(b.result_code||"").slice(0,64);
+    const reportedDetail=JSON.stringify(b.detail||{}).slice(0,3500);
+    // The Agent persists results before sending them. A lost HTTP ACK must
+    // permit the exact same terminal result without rerunning the operation
+    // or inserting another audit row. Changed results are never accepted.
+    if(["SUCCEEDED","FAILED"].includes(status)&&
+       ["SUCCEEDED","FAILED"].includes(op.status)){
+      must(op.status===status&&op.result_code===reportedCode&&
+        op.detail===reportedDetail,"CONFLICTING_OPERATION_REPORT",409);
+      if(op.action==="ssh.verification.prepare"&&status==="SUCCEEDED"){
+        const c=JSON.parse(op.command_json);
+        const saved=await env.DB.prepare(
+          "SELECT prepared_at,status FROM ssh_verifications WHERE id=? AND node_id=?"
+        ).bind(c.payload.verification_id,id).first<any>();
+        must(saved&&saved.prepared_at!=null,"PREPARATION_SIDE_EFFECT_MISSING",409);
+      }
+      return response({accepted:true,idempotent:true});
+    }
     const allowed=status==="RUNNING"?["DISPATCHED"]:["DISPATCHED","RUNNING"];
     must(allowed.includes(op.status),"INVALID_STATUS_TRANSITION",409);
     if(status==="SUCCEEDED"&&op.action==="ssh.policy.inspect"){
@@ -223,10 +244,10 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
         "INSTALL_PROOF_MISSING",409);
     }
-    const detail=JSON.stringify(b.detail||{}).slice(0,3500);
+    const detail=reportedDetail;
     const changes=await env.DB.prepare("UPDATE operations SET status=?,result_code=?,detail=?,finished_at=? WHERE id=? AND node_id=? AND status IN ("+
       allowed.map(()=>"?").join(",")+")")
-      .bind(status,String(b.result_code||"").slice(0,64),detail,status==="RUNNING"?null:now(),opId,id,...allowed).run();
+      .bind(status,reportedCode,detail,status==="RUNNING"?null:now(),opId,id,...allowed).run();
     must(changes.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
     if(op.action==="ssh.verification.prepare"&&status!=="RUNNING"){
       const c=JSON.parse(op.command_json);
