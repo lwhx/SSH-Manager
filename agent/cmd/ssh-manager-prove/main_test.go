@@ -50,8 +50,7 @@ func TestProveRejectsFakeOrUntrustedResponses(t *testing.T){
  }{
   t.Run(reply,func(t *testing.T){
    path:=localProofServer(t,func(c *net.UnixConn){
-    _,_ = c.Write([]byte(reply+"
-"))
+    _,_ = c.Write([]byte(reply))
    })
    if err:=runAtSocket(path,challengeID,nonce43);err==nil{
     t.Fatal("accepted unsupported proof helper response")
