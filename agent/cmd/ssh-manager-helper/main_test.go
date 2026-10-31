@@ -6,6 +6,7 @@ import (
  "crypto/rand"
  "encoding/base64"
  "encoding/json"
+ "io"
  "net"
  "os"
  "path/filepath"
@@ -113,4 +114,51 @@ func TestProofSocketUsesKernelPeerCredentialsAndFailClosed(t *testing.T){
   t.Fatalf("kernel proof credentials missing or incorrect: %+v",creds)
  }
  <-completed
+}
+
+
+func TestRealHelperSocketRecoversOnlyRootDurablyStoredResult(t *testing.T){
+ listener,h,key:=testListener(t)
+ defer listener.Close()
+ operationID:="20000000-0000-4000-8000-000000000001"
+ issue:=func(request []byte)[]byte{
+  t.Helper()
+  finished:=make(chan struct{})
+  go func(){
+   defer close(finished)
+   conn,err:=listener.AcceptUnix()
+   if err==nil{handle(conn,uint32(os.Getuid()),h)}
+  }()
+  conn,err:=net.DialUnix("unix",nil,listener.Addr().(*net.UnixAddr))
+  if err!=nil{t.Fatal(err)}
+  defer conn.Close()
+  _=conn.SetDeadline(time.Now().Add(3*time.Second))
+  if _,err=conn.Write(request);err!=nil{t.Fatal(err)}
+  if err=conn.CloseWrite();err!=nil{t.Fatal(err)}
+  raw,err:=io.ReadAll(io.LimitReader(conn,8192))
+  if err!=nil{t.Fatal(err)}
+  <-finished
+  return raw
+ }
+ var first sshhelper.Result
+ if err:=json.Unmarshal(issue(testRequest(t,key)),&first);err!=nil{t.Fatal(err)}
+ if !first.OK||first.Code!="POLICY_INSPECTED"{t.Fatalf("Root operation not completed: %+v",first)}
+ recoverRequest:=func(action string)[]byte{
+  raw,_:=json.Marshal(map[string]string{
+   "local_action":"operation.recover","operation_id":operationID,"action":action,
+  })
+  return raw
+ }
+ var recovered sshhelper.JournalRecovery
+ if err:=json.Unmarshal(issue(recoverRequest("ssh.policy.inspect")),&recovered);err!=nil{t.Fatal(err)}
+ if recovered.State!="RECORDED"||!recovered.Result.OK||recovered.Result.Code!=first.Code{
+  t.Fatalf("Root socket did not recover signed operation: %+v",recovered)
+ }
+ var rejected map[string]any
+ if err:=json.Unmarshal(issue(recoverRequest("ssh.daily.install")),&rejected);err!=nil{t.Fatal(err)}
+ if rejected["state"]!="ERROR"{t.Fatalf("cross-action journal inspection accepted: %v",rejected)}
+ // Recovery is read-only; a replayed original command remains blocked.
+ var duplicate sshhelper.Result
+ if err:=json.Unmarshal(issue(testRequest(t,key)),&duplicate);err!=nil{t.Fatal(err)}
+ if duplicate.OK{t.Fatal("signed SSH command was executed twice")}
 }
