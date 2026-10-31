@@ -142,3 +142,7 @@ Owner 在「双公钥管理」页面生成 5 分钟的一次性身份绑定码�
 ## P3.3 Agent 配对权限与事务一致性加固
 
 已补齐 Agent 配对配置中固定的 Root Helper Socket、systemd StateDirectory，并限制服务账户私钥文件权限；旧配对配置可安全兼容缺失字段。Cloudflare Root 签名验证后的 VERIFIED、node stage、日常密钥时间及人工审计统一提交为一个 D1 事务。详细见 [隔离 Staging 验收清单](docs/P3_STAGING_DEPLOY_CHECKLIST.md)。此阶段不部署生产服务器，也不开放 P4。
+
+## P3.3 断网重试及死信队列
+
+Root Helper 签名证明和 Agent 操作结果分别持久化；只有 Cloudflare 明确返回的不可恢复错误才会进入相应的 root/Agent 私有隔离目录，保留原始证据并避免阻塞下一次验证。网络错误、未知 409 和延迟准备回执均不会自动删除。操作结果落盘后，Agent 重启可仅重发回执，不重执行 SSH 命令。见 [P3.3 断网恢复设计与安全边界](docs/P3_RELIABILITY.md)。真实 VPS + Cloudflare Staging E2E 仍未验收，P4 仍锁定。
