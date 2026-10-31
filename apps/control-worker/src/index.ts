@@ -116,7 +116,7 @@ async function freshPairToken(env:Env,user:Actor,nodeId:string){
 
 async function queueNodeOperation(
   req:Request, env:Env, a:Actor, node:any,
-  action:"node.preflight"|"ssh.daily.install", payload:Record<string,unknown>
+  action:"node.preflight"|"ssh.policy.inspect"|"ssh.daily.install", payload:Record<string,unknown>
 ):Promise<Response>{
   ensure(isOnline(node),"NODE_OFFLINE",409);
   const idem=req.headers.get("Idempotency-Key");
@@ -192,12 +192,17 @@ async function handle(req:Request,env:Env):Promise<Response>{
       needRole(a,"admin");
       return queueNodeOperation(req,env,a,node,"node.preflight",{login_user:node.login_user,ssh_port:node.ssh_port});
     }
+    if(sub==="ssh-policy/inspect"&&req.method==="POST"){
+      needRole(a,"admin");
+      return queueNodeOperation(req,env,a,node,"ssh.policy.inspect",{login_user:node.login_user,ssh_port:node.ssh_port});
+    }
     if(sub==="daily-key/install"&&req.method==="POST"){
       needRole(a,"admin");
       // The Agent must still reject privileged SSH writes while the P3 helper
       // and authenticated login-proof workflow are incomplete.
       const key=await env.DB.prepare("SELECT * FROM public_keys WHERE purpose='daily' AND active=1").first<any>();
       ensure(key,"DAILY_KEY_MISSING",409);
+      ensure(node.config_revision!=="unverified","POLICY_INSPECTION_REQUIRED",409);
       return queueNodeOperation(req,env,a,node,"ssh.daily.install",
         {login_user:node.login_user,public_key:key.public_key,key_id:key.id,fingerprint:key.fingerprint});
     }

@@ -85,6 +85,15 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     must(op,"OPERATION_NOT_FOUND",404);
     const allowed=status==="RUNNING"?["DISPATCHED"]:["DISPATCHED","RUNNING"];
     must(allowed.includes(op.status),"INVALID_STATUS_TRANSITION",409);
+    if(status==="SUCCEEDED"&&op.action==="ssh.policy.inspect"){
+      const c=JSON.parse(op.command_json);
+      must(b.detail&&plain(b.detail)&&
+        typeof b.detail.revision==="string"&&/^[a-f0-9]{64}$/.test(b.detail.revision)&&
+        b.detail.login_user===c.payload.login_user&&
+        b.detail.verified_login===false&&
+        b.result_code==="POLICY_INSPECTED",
+        "INVALID_POLICY_REPORT",409);
+    }
     // Validate helper proof BEFORE setting a sensitive operation to SUCCEEDED.
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
       const c=JSON.parse(op.command_json);
@@ -96,6 +105,10 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       allowed.map(()=>"?").join(",")+")")
       .bind(status,String(b.result_code||"").slice(0,64),detail,status==="RUNNING"?null:now(),opId,id,...allowed).run();
     must(changes.meta.changes===1,"INVALID_STATUS_TRANSITION",409);
+    if(status==="SUCCEEDED"&&op.action==="ssh.policy.inspect"&&plain(b.detail)){
+      await env.DB.prepare("UPDATE nodes SET config_revision=?,init_stage='POLICY_INSPECTED' WHERE id=?")
+        .bind(b.detail.revision,id).run();
+    }
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
       const c=JSON.parse(op.command_json);
       await env.DB.prepare("INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) VALUES (?,?,?,?,'daily','installed')")
