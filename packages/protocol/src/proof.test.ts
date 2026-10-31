@@ -61,3 +61,22 @@ describe("SSH challenge preparation races",()=>{
   expect(proofChallengeReadiness(null,1000)).toBe("CHALLENGE_NOT_ACTIVE");
  });
 });
+
+describe("temporarily disconnected Agent proof delivery",()=>{
+ it("accepts a previously signed SSH observation after a 90-second outage within the original challenge TTL",async()=>{
+  const s=await sign(proof());
+  await expect(verifyPinnedSSHProof(s.payload,s.signature,s.publicKey,{
+   ...expected(),now:1120
+  })).resolves.toMatchObject({node_id:node});
+ });
+ it("never extends an expired challenge or permits a forged observation from the future",async()=>{
+  const s=await sign(proof());
+  await expect(verifyPinnedSSHProof(s.payload,s.signature,s.publicKey,{
+   ...expected(),now:1300
+  })).rejects.toThrow();
+  const future=await sign({...proof(),observed_at:1200});
+  await expect(verifyPinnedSSHProof(future.payload,future.signature,future.publicKey,{
+   ...expected(),now:1120
+  })).rejects.toThrow();
+ });
+});

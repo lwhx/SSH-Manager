@@ -25,7 +25,10 @@ export function proofMatchesChallenge(proof:ProofEvidence,expected:ExpectedSSHPr
   Number.isInteger(proof.authenticated_at)&&Number.isInteger(proof.observed_at)&&
   proof.authenticated_at>=expected.createdAt&&proof.authenticated_at<expected.expiresAt&&
   proof.observed_at>=proof.authenticated_at&&proof.observed_at<expected.expiresAt&&
-  proof.observed_at<=expected.now+10&&proof.observed_at>=expected.now-60&&
+  // The Agent may be offline for part of the five-minute challenge; a
+  // trusted signed observation remains valid until challenge expiry.
+  // Do not impose an unrelated 60-second network-delivery deadline.
+  proof.observed_at<=expected.now+10&&
   expected.now<expected.expiresAt&&
   Number.isInteger(proof.client_port)&&proof.client_port>0&&proof.client_port<=65535&&
   typeof proof.client_ip==="string"&&proof.client_ip.length>0&&proof.client_ip.length<=45&&
