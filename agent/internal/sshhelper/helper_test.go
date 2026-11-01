@@ -107,6 +107,34 @@ func TestFailClosedPolicies(t *testing.T){
   })
  }
 }
+func TestDailyInstallUncertainAfterWriteNeverReportsDefiniteFailure(t *testing.T){
+ signer,pub:=makeSigner(t)
+ cases:=[]struct{name string;withError bool;want string}{
+  {"partial-write",true,"KEY_INSTALL_FAILED_MANUAL_REVIEW"},
+  {"postwrite-verification-failed",false,"KEY_INSTALL_NOT_VERIFIED_MANUAL_REVIEW"},
+ }
+ for _,tc:=range cases{
+  t.Run(tc.name,func(t *testing.T){
+   h,_:=newHandler(t,pub)
+   marker:=filepath.Join(t.TempDir(),"simulated-authorized_keys")
+   h.Install=func(home string,uid,gid int,key,snapshot string)(sshkeys.Result,error){
+    if err:=os.WriteFile(marker,[]byte("public-key-written"),0600);err!=nil{
+     return sshkeys.Result{},err
+    }
+    if tc.withError{return sshkeys.Result{},errors.New("simulated disk sync failure after append")}
+    return sshkeys.Result{FileChecked:false},nil
+   }
+   cmd:=validCommand(t)
+   got:=h.Execute(context.Background(),signed(t,signer,cmd))
+   if _,err:=os.Stat(marker);err!=nil{t.Fatalf("test did not reach key write: %v",err)}
+   if got.OK||got.Code!=tc.want{t.Fatalf("ambiguous SSH key change treated as definitive failure: %+v",got)}
+   root,err:=h.Journal.Recover(cmd.ID,cmd.NodeID,cmd.Action)
+   if err!=nil||root.State!="RECORDED"||root.Result.Code!=tc.want{
+    t.Fatalf("unsafe/absent durable Root result: %+v %v",root,err)
+   }
+  })
+ }
+}
 func TestTamperedSignatureNeverRuns(t *testing.T){
  key,pub:=makeSigner(t)
  h,calls:=newHandler(t,pub)
