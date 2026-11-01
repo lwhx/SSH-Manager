@@ -16,7 +16,7 @@ export interface VerificationReadRow {
 }
 
 function isPendingVerificationUniqueness(error:unknown):boolean {
- const constraint=/UNIQUE constraint failed:\\s*(?:ssh_verifications\\.node_id\\b|idx_one_pending_verification_per_node\\b)/i;
+ const constraint=/UNIQUE constraint failed:\s*(?:ssh_verifications\.node_id\b|idx_one_pending_verification_per_node\b)/i;
  let candidate:unknown=error;
  for(let i=0;i<5;i++){
   if(typeof candidate==="string")return constraint.test(candidate);
