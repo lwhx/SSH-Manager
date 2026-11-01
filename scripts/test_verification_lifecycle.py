@@ -130,7 +130,7 @@ class VerificationLifecycleSqlTests(unittest.TestCase):
             self.db.execute(
                 "SELECT action FROM audit_logs ORDER BY created_at,id"
             ).fetchall(),
-            [("ssh.verification.cancel",), ("ssh.verification.start",)]
+            [("ssh.verification.start",), ("ssh.verification.cancel",)]
         )
 
     def test_expired_pending_is_safely_replaced_in_same_transaction(self):
