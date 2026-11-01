@@ -242,7 +242,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
             ],
             "assets": {"directory": "./apps/console/dist", "binding": "ASSETS",
                        "run_worker_first": True},
-            "d1_databases": [{}
+            "d1_databases": [{
                 "binding": "DB", "database_name": "ssh-manager-staging",
                 "database_id": UUID,
             }]
@@ -251,7 +251,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         path.chmod(0o600)
         return data
 
-    def test_staging_target_requires_exact_name_binding_and_uuid(self):
+    def test_staging_target_requires_exact_name_binding_uuid_and_routes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / preflight.CONFIG_NAME
@@ -261,15 +261,18 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     preflight.staging_config(path, OTHER_UUID)
                 for modification in (
-                lambda c: c["vars"].update(MANUAL_SSH_ACTIONS_ENABLED="true"),
-                lambda c: c.update(name="ssh-manager"),
-                lambda c: c["d1_databases"][0].update(database_name="production"),
-                lambda c: c["vars"].update(CONTROL_HOSTNAME="ssh.example.invalid"),
-                lambda c: c.update(env={"production": {}}),
-            ):
-                changed = json.loads(json.dumps(data))
-                modification(changed)
-                path.write_text(json.dumps(changed), encoding="utf-8")
+                    lambda c: c["vars"].update(MANUAL_SSH_ACTIONS_ENABLED="true"),
+                    lambda c: c.update(name="ssh-manager"),
+                    lambda c: c["d1_databases"][0].update(database_name="production"),
+                    lambda c: c["vars"].update(CONTROL_HOSTNAME="ssh.example.invalid"),
+                    lambda c: c.update(env={"production": {}}),
+                    lambda c: c["routes"].pop(),
+                    lambda c: c["routes"][0].update(pattern="evil.example.invalid"),
+                    lambda c: c["assets"].update(run_worker_first=False),
+                ):
+                    changed = json.loads(json.dumps(data))
+                    modification(changed)
+                    path.write_text(json.dumps(changed), encoding="utf-8")
                     with self.assertRaises(ValueError):
                         preflight.staging_config(path, UUID)
                 outside = root.parent / preflight.CONFIG_NAME
