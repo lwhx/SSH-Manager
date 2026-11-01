@@ -33,6 +33,7 @@ jobs:
       - run: sudo python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
       - run: python3 -m unittest discover -s scripts -p test_staging_readiness.py
       - run: python3 -m unittest discover -s scripts -p test_staging_remote_probe.py
+      - run: python3 -m unittest discover -s scripts -p test_staging_d1_readonly_preflight.py
       - run: npm run test
       - run: npm run test:cf:quick
       - run: npm run test:cf:native
