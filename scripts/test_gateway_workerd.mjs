@@ -25,10 +25,14 @@ const id={
  verify2:"70000000-0000-4000-8000-000000000001",
  proof:"80000000-0000-4000-8000-000000000001",
  keyRow:"90000000-0000-4000-8000-000000000001",
+ pairNode:"a0000000-0000-4000-8000-000000000001",
+ pairToken:"b0000000-0000-4000-8000-000000000001",
 };
 const rev="a".repeat(64),nonceHash="b".repeat(64);
 const fingerprint="SHA256:"+"A".repeat(43);
 const t=Math.floor(Date.now()/1000);
+const pairingToken="local-only-pairing-token-"+"x".repeat(24);
+const pairingTokenHash=createHash("sha256").update(pairingToken).digest("hex");
 const toURL=b=>Buffer.from(b).toString("base64url");
 const q=s=>"'"+String(s).replaceAll("'","''")+"'";
 let worker;
@@ -70,6 +74,10 @@ function seedSql(devicePublic,rootPublic){
    [id.actor,"owner@ci.invalid","owner","active",t-100]),
   insert("nodes",["id","name","ssh_host","login_user","status","init_stage","config_revision","created_at"],
    [id.node,"local-worker-ci","192.0.2.10","root","online","WAITING_VERIFICATION",rev,t-100]),
+  insert("nodes",["id","name","ssh_host","login_user","status","init_stage","config_revision","created_at"],
+   [id.pairNode,"pairing-fixture","192.0.2.11","root","unpaired","WAITING_PAIR","unverified",t-100]),
+  insert("pairing_tokens",["id","node_id","token_hash","expires_at","created_by"],
+   [id.pairToken,id.pairNode,pairingTokenHash,t+600,id.actor]),
   insert("agent_credentials",["node_id","public_key","paired_at"],
    [id.node,devicePublic,t-50]),
   insert("public_keys",["id","purpose","name","algorithm","public_key","fingerprint","version","created_by","created_at"],
@@ -170,6 +178,46 @@ async function main(){
  boundary=await fetch(host+"/agent/v1/health");
  assert.equal(boundary.status,200,"Agent hostname failed to route");
  assert.equal((await boundary.json()).agent_auth,"device-ed25519");
+ // Agent pairing must be audited in the same D1 transaction as credential
+ // creation and one-time token consumption. An audit failure must roll back all.
+ const pairingDevice=await webcrypto.subtle.generateKey("Ed25519",true,["sign","verify"]);
+ const pairingPublic=toURL(await webcrypto.subtle.exportKey("raw",pairingDevice.publicKey));
+ d1(["--command","CREATE TRIGGER ci_fail_agent_pair_audit BEFORE INSERT ON audit_logs "+
+  "WHEN NEW.action='agent.pair' BEGIN SELECT RAISE(ABORT, 'CI_ABORT_PAIR_AUDIT'); END"]);
+ let pairResponse=await fetch(host+"/agent/v1/pair",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({node_id:id.pairNode,token:pairingToken,public_key:pairingPublic})});
+ assert.equal(pairResponse.status,500,"Audit failure must abort the pairing transaction");
+ let pairState=query("SELECT (SELECT COUNT(*) FROM agent_credentials WHERE node_id="+q(id.pairNode)+
+  ") AS credentials,(SELECT used_at FROM pairing_tokens WHERE id="+q(id.pairToken)+
+  ") AS used_at,(SELECT status FROM nodes WHERE id="+q(id.pairNode)+
+  ") AS node_status,(SELECT COUNT(*) FROM audit_logs WHERE node_id="+q(id.pairNode)+
+  " AND action='agent.pair') AS audit_count");
+ assert.equal(pairState[0].credentials,0,"credential insert must roll back with audit failure");
+ assert.equal(pairState[0].used_at,null,"pairing token must remain unused after rollback");
+ assert.equal(pairState[0].node_status,"unpaired");
+ assert.equal(pairState[0].audit_count,0);
+ d1(["--command","DROP TRIGGER ci_fail_agent_pair_audit"]);
+ pairResponse=await fetch(host+"/agent/v1/pair",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({node_id:id.pairNode,token:pairingToken,public_key:pairingPublic})});
+ assert.equal(pairResponse.status,201,JSON.stringify(await pairResponse.clone().json()));
+ pairState=query("SELECT (SELECT COUNT(*) FROM agent_credentials WHERE node_id="+q(id.pairNode)+
+  ") AS credentials,(SELECT used_at FROM pairing_tokens WHERE id="+q(id.pairToken)+
+  ") AS used_at,(SELECT status FROM nodes WHERE id="+q(id.pairNode)+
+  ") AS node_status,(SELECT COUNT(*) FROM audit_logs WHERE node_id="+q(id.pairNode)+
+  " AND action='agent.pair') AS audit_count");
+ assert.equal(pairState[0].credentials,1);
+ assert(pairState[0].used_at>0);
+ assert.equal(pairState[0].node_status,"online");
+ assert.equal(pairState[0].audit_count,1,"successful pairing must create exactly one audit event");
+ const pairReplay=await fetch(host+"/agent/v1/pair",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({node_id:id.pairNode,token:pairingToken,public_key:pairingPublic})});
+ expectCode({status:pairReplay.status,json:await pairReplay.json()},409,"NODE_ALREADY_PAIRED");
+ assert.equal(query("SELECT COUNT(*) AS count FROM audit_logs WHERE node_id="+q(id.pairNode)+
+  " AND action='agent.pair'")[0].count,1,"replayed pairing must not duplicate audit");
+
  // Raw unsigned HTTP, even with a valid device ID, can never mutate D1.
  let res=await fetch(host+"/agent/v1/report",{method:"POST",
   headers:{"Content-Type":"application/json"},
