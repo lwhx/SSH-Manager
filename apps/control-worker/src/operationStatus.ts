@@ -54,3 +54,24 @@ export async function withNodeOperationConflictGuard<T>(
   throw new ApiError(code||"NODE_OPERATION_IN_PROGRESS",409);
  }
 }
+
+
+/**
+ * CREATED is not dispatched until the gateway atomically claims it.
+ * Expiring only stale CREATED operations releases the D1 single-flight
+ * index safely. DISPATCHED/RUNNING outcomes must remain blocking forever
+ * until an authenticated terminal report resolves them.
+ *
+ * Both normal actions and verification preparation must use this guard.
+ */
+export async function assertNodeOperationSlotFree(
+ db:D1Database,nodeId:string,at:number
+):Promise<void>{
+ await db.prepare(
+  "UPDATE operations SET status='EXPIRED' WHERE node_id=? AND status='CREATED' AND expires_at<=?"
+ ).bind(nodeId,at).run();
+ const pending=await db.prepare(PENDING_NODE_OPERATION_SQL)
+  .bind(nodeId,at).first<OperationRow>();
+ const blocking=pending?blockingNodeOperationCode(pending,at):null;
+ if(blocking)throw new ApiError(blocking,409);
+}

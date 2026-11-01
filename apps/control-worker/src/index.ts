@@ -1,6 +1,6 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
-import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard} from "./operationStatus";
+import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
@@ -131,11 +131,7 @@ async function queueNodeOperation(
   const exists=await env.DB.prepare("SELECT id,status FROM operations WHERE operator_id=? AND idempotency_key=?").bind(a.id,idem).first<any>();
   if(exists)return response({operation_id:exists.id,status:exists.status});
   ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
-  await env.DB.prepare("UPDATE operations SET status='EXPIRED' WHERE node_id=? AND status='CREATED' AND expires_at<=?").bind(node.id,now()).run();
-  const tick=now();
-  const pending=await env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,tick).first<{status:string;expires_at:number}>();
-  const blocker=pending?blockingNodeOperationCode(pending,tick):null;
-  ensure(!blocker,blocker||"NODE_OPERATION_IN_PROGRESS",409);
+  await assertNodeOperationSlotFree(env.DB,node.id,now());
   const id=crypto.randomUUID(),t=now();
   const cmd={v:1 as const,id,node_id:node.id,action,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload};
   const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
@@ -301,9 +297,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
       const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
       const nonceHash=await sha256hex(token),id=crypto.randomUUID(),expires=t+VERIFICATION_TTL_SECONDS;
       ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
-      const pendingOp=await env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,t).first<{status:string;expires_at:number}>();
-      const blocking=pendingOp?blockingNodeOperationCode(pendingOp,t):null;
-      ensure(!blocking,blocking||"NODE_OPERATION_IN_PROGRESS",409);
+      await assertNodeOperationSlotFree(env.DB,node.id,t);
       const operationId=crypto.randomUUID();
       const cmd={
         v:1 as const,id:operationId,node_id:node.id,action:"ssh.verification.prepare" as const,
