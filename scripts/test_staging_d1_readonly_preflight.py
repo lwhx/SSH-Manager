@@ -182,6 +182,20 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         self.assertEqual(lookup["verified_missing_audit"]["count"], 1)
         self.assertEqual(lookup["verified_missing_installed_key"]["count"], 1)
 
+    def test_schema_rejects_wrong_or_nonunique_partial_index_definitions(self):
+        definitions = (
+            "CREATE UNIQUE INDEX idx_key_active ON public_keys(name) WHERE active=1",
+            "CREATE UNIQUE INDEX idx_key_active ON public_keys(purpose) WHERE version>0",
+            "CREATE INDEX idx_key_active ON public_keys(purpose) WHERE active=1",
+        )
+        for ddl in definitions:
+            with self.subTest(ddl=ddl):
+                self.db.execute("DROP INDEX idx_key_active")
+                self.db.execute(ddl)
+                self.db.commit()
+                schema = preflight.local_query(self.db, preflight.SCHEMA_SQL)[0]
+                self.assertFalse(preflight.validate_schema(schema))
+
     def test_missing_schema_blocks_without_reading_undeclared_tables(self):
         empty = sqlite3.connect(":memory:")
         empty.row_factory = sqlite3.Row
