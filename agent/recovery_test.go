@@ -211,11 +211,11 @@ func TestDurableRootFailureStillBecomesTerminalFailure(t *testing.T){
   IssuedAt:time.Now().Unix(),
  }
  a.handleHelperResult(context.Background(),cmd,LocalHelperResult{
-  OK:false,Code:"PASSWORD_DISABLE_MANUAL_REVIEW",
+  OK:false,Code:"MANUAL_NODE_CONFIRMATION_REQUIRED",
  })
  path:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
  saved,_,err:=readOperationReport(path)
- if err!=nil||saved.Status!="FAILED"||saved.ResultCode!="PASSWORD_DISABLE_MANUAL_REVIEW"{
+ if err!=nil||saved.Status!="FAILED"||saved.ResultCode!="MANUAL_NODE_CONFIRMATION_REQUIRED"{
   t.Fatalf("durable helper failure was not preserved: %+v %v",saved,err)
  }
 }
