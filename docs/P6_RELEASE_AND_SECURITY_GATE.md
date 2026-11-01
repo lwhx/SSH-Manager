@@ -56,7 +56,7 @@ WHERE NOT EXISTS (
 
 在批准任何部署、人工 SSH 安全写入或 PR 合并前，先由 Owner 和独立审查者完成 [Staging D1 只读预检](STAGING_D1_READONLY_PREFLIGHT.md)。先核对已固定的 Git SHA、Cloudflare 账户、现有 Worker 数据库绑定与 Staging D1 UUID，再根据明确授权运行 `scripts/staging_d1_readonly_preflight.py`。该工具默认只输出查询计划；只有显式 `--execute-remote` 才会使用项目安装的 Wrangler 发起**固定聚合 SELECT**。
 
-检查至少包含：Root 公钥绑定审计、跨 VPS Root 证明公钥复用、单 VPS 未结束操作锁、已派发过期结果未知、终态操作审计缺失/重复、VERIFIED 证明一致性、PENDING 旧配置或无效日常密钥、版本冲突、配对审计。所有异常只汇报数量，禁止自动补写审计、释放锁、更新密钥、修改 D1 或执行远端 SSH 操作。
+检查至少包含：Root 公钥绑定审计、跨 VPS Root 证明公钥复用、单 VPS 未结束操作锁（任何 DISPATCHED/RUNNING 均阻断，TTL 不解锁）、终态操作审计缺失/重复、VERIFIED 证明一致性、PENDING 旧配置或无效日常密钥、版本冲突、配对审计。所有异常只汇报数量，禁止自动补写审计、释放锁、更新密钥、修改 D1 或执行远端 SSH 操作。
 
 退出码 `0` **只表示该次 D1 完整性检查通过**；`2` 为阻断，`3` 为需要人工判断的 WARN，`4` 为只显示计划、根本没有执行检查。即便 `0`，仍必须完成独立 GitHub 安全 Review、Cloudflare Access/RBAC 浏览器验收、T01–T11、真实独立 VPS 的 Root Helper 与手动恢复测试，才能讨论发布。
 
