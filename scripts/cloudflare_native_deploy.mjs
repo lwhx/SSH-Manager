@@ -19,7 +19,8 @@ import {
 } from "./cloudflare_native_lib.mjs";
 import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
  DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery,
- UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight} from "./native_security_helpers.mjs";
+ UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight,
+ buildUnresolvedOperationPreflightArgs} from "./native_security_helpers.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
@@ -120,8 +121,7 @@ function buildAssets(){
   throw Error("Built React assets are missing");
 }
 function assertNoDuplicateUnresolvedOperations(){
- const raw=wrangler(["d1","execute","DB","--remote","--json",
-  "--config",CONFIG,"--command",UNRESOLVED_OPERATION_PREFLIGHT_SQL],{capture:true});
+ const raw=wrangler(buildUnresolvedOperationPreflightArgs(DB,CONFIG),{capture:true});
  let parsed;
  try{parsed=JSON.parse(raw);}catch{
   throw Error("Staging D1 operation preflight failed: invalid Wrangler JSON response");

@@ -110,3 +110,12 @@ export function validateUnresolvedOperationPreflight(payload){
  }
  return true;
 }
+
+export function buildUnresolvedOperationPreflightArgs(database,config){
+ if(typeof database!=="string"||!database.trim())
+  throw Error("Staging D1 operation preflight requires a database name");
+ if(typeof config!=="string"||!config.trim())
+  throw Error("Staging D1 operation preflight requires a Wrangler config path");
+ return ["d1","execute",database,"--remote","--json","--config",config,
+  "--command",UNRESOLVED_OPERATION_PREFLIGHT_SQL];
+}
