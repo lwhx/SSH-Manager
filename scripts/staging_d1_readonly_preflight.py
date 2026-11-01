@@ -292,7 +292,7 @@ def staging_config(config: Path, confirmed_id: str) -> Path:
     control_host = vars_.get("CONTROL_HOSTNAME")
     agent_host = vars_.get("AGENT_HOSTNAME")
     hostname = re.compile(
-        r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+        r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
     )
     if (not isinstance(control_host, str) or not isinstance(agent_host, str)
         or control_host == agent_host
@@ -320,7 +320,8 @@ def parse_wrangler_json(raw: str) -> list[dict[str, Any]]:
         if len(payload) != 1:
             raise ValueError("Expected exactly one Wrangler query")
         payload = payload[0]
-    if not isinstance(payload, dict) or payload.get("success") is not True:
+    if (not isinstance(payload, dict) or payload.get("success") is not True
+        or payload.get("errors")):
         raise ValueError("Wrangler reported an unsuccessful query")
     rows = payload.get("results")
     if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
