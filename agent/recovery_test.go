@@ -134,6 +134,33 @@ func TestUnconfirmedRootWriteNeverBecomesSucceededOrFailed(t *testing.T){
   t.Fatal("unconfirmed authorized_keys action produced a fake operation report")
  }
 }
+func TestDurableManualReviewRootResultRemainsUnknown(t *testing.T){
+ a:=newRecoveryAgent(t,"https://unused.example",&http.Client{})
+ cmd:=Command{
+  ID:"90000000-0000-4000-8000-000000000001",
+  NodeID:a.config.NodeID,Action:"ssh.password.disable",
+  IssuedAt:time.Now().Unix()-3,
+ }
+ if err:=a.claimOperation(cmd);err!=nil{t.Fatal(err)}
+ root:=&sshhelper.Journal{Directory:filepath.Join(t.TempDir(),"root-journal")}
+ if err:=root.Claim(cmd.ID,cmd.NodeID,cmd.Action);err!=nil{t.Fatal(err)}
+ if err:=root.Finalize(cmd.ID,cmd.NodeID,cmd.Action,sshhelper.Result{
+  OK:false,Code:"PASSWORD_DISABLE_MANUAL_REVIEW",
+ });err!=nil{t.Fatal(err)}
+ socket,stop:=serveOneRootJournalRecovery(t,root,cmd.NodeID)
+ a.recoverClaimedOperationsWithSocket(context.Background(),socket)
+ stop()
+ report:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+ if _,err:=os.Stat(report);!errors.Is(err,os.ErrNotExist){
+  t.Fatalf("durable manual-review outcome became a terminal FAILED report: %v",err)
+ }
+ review:=filepath.Join(a.config.StateDir,"operations",cmd.ID+".review")
+ content,err:=os.ReadFile(review)
+ if err!=nil||string(content)!="UNCONFIRMED\n"{
+  t.Fatalf("manual-review outcome was not preserved locally: %q %v",content,err)
+ }
+}
+
 func TestRecoveryRejectsDifferentNodeAndUntrustedReceipt(t *testing.T){
  a:=newRecoveryAgent(t,"https://unused.example",&http.Client{})
  other:=Command{
