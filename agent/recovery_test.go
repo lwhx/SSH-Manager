@@ -202,6 +202,26 @@ func TestUndurableRootResultNeverBecomesTerminalFailure(t *testing.T){
  }
 }
 
+func TestLegacyDailyInstallErrorsNeverUnlockCloudOperation(t *testing.T){
+ for _,code:=range []string{"KEY_INSTALL_FAILED","KEY_INSTALL_NOT_VERIFIED"}{
+  t.Run(code,func(t *testing.T){
+   a:=newRecoveryAgent(t,"https://127.0.0.1:1",&http.Client{Timeout:time.Second})
+   a.config.HelperSocket="/nonstandard/test-socket"
+   cmd:=Command{
+    ID:"70000000-0000-4000-8000-000000000002",
+    NodeID:a.config.NodeID,Action:"ssh.daily.install",
+    IssuedAt:time.Now().Unix(),
+   }
+   a.handleHelperResult(context.Background(),cmd,LocalHelperResult{
+    OK:false,Code:code,
+   })
+   report:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+   if _,err:=os.Stat(report);!errors.Is(err,os.ErrNotExist){
+    t.Fatalf("legacy uncertain public-key write became terminal cloud failure: %v",err)
+   }
+  })
+ }
+}
 func TestDurableRootFailureStillBecomesTerminalFailure(t *testing.T){
  a:=newRecoveryAgent(t,"https://127.0.0.1:1",&http.Client{Timeout:time.Second})
  a.config.HelperSocket="/nonstandard/test-socket"
