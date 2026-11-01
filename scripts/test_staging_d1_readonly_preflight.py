@@ -142,11 +142,16 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
     def test_live_created_operation_and_pending_challenge_are_warnings_not_approval(self):
         self.seed_daily()
         self.db.execute(
+            "INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) "
+            "VALUES (?,?,?,?,?,?)",
+            ("daily-key-row", NODE, KEY, "root", "daily", "installed"),
+        )
+        self.db.execute(
             "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,"
             "config_revision,nonce_hash,status,created_at,expires_at,public_key_id,issued_by)"
             " VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)",
             ("challenge-1", NODE, "SHA256:fixture", "root", REVISION, "hash",
-             1, 2, KEY, OWNER),
+             1, 9999999999, KEY, OWNER),
         )
         self.db.execute(
             "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,"
@@ -164,6 +169,20 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         self.assertEqual(lookup["pending_challenge_present"]["count"], 1)
         self.assertEqual(lookup["queued_operation_present"]["count"], 1)
         self.assertFalse(report["preflight_ready"])
+
+    def test_pending_challenge_without_matching_installed_node_key_blocks(self):
+        self.seed_daily()
+        self.db.execute(
+            "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,"
+            "config_revision,nonce_hash,status,created_at,expires_at,public_key_id,issued_by)"
+            " VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)",
+            ("challenge-no-key", NODE, "SHA256:fixture", "root", REVISION, "hash",
+             1, 9999999999, KEY, OWNER),
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["pending_missing_installed_key"]["count"], 1)
 
     def test_verified_without_root_proof_or_audit_blocks(self):
         self.seed_daily()
