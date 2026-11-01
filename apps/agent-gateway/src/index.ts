@@ -51,15 +51,26 @@ async function pair(req:Request,env:Env):Promise<Response>{
       "INSERT OR IGNORE INTO agent_credentials(node_id,public_key,paired_at) SELECT ?,?,? WHERE EXISTS "+
       "(SELECT 1 FROM pairing_tokens WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)"
     ).bind(id,key,t,id,digest,t),
+    // Attribute the pairing audit to the Owner/Admin who issued this token.
+    // The row is inserted only if the preceding credential INSERT succeeded,
+    // and while the same one-time token is still unused. A failed audit aborts
+    // the entire D1 batch, rolling back credential creation and token use.
+    env.DB.prepare(
+      "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
+      "SELECT ?,created_by,?,'agent.pair',NULL,'success',NULL,? FROM pairing_tokens "+
+      "WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>? "+
+      "AND EXISTS (SELECT 1 FROM agent_credentials WHERE node_id=? AND public_key=? AND paired_at=?)"
+    ).bind(crypto.randomUUID(),id,t,id,digest,t,id,key,t),
     env.DB.prepare("UPDATE pairing_tokens SET used_at=? WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>?")
       .bind(t,id,digest,t),
     env.DB.prepare("UPDATE nodes SET status='online',init_stage='PREFLIGHT',last_seen_at=? WHERE id=? AND EXISTS "+
       "(SELECT 1 FROM agent_credentials WHERE node_id=? AND public_key=?)").bind(t,id,id,key)
   ];
-  // D1 batch is transactional: pairing token consumption and device binding
+  // D1 batch is transactional: credential binding, audit, and token consumption
   // cannot be partially committed on DB failures.
-  const [added,consumed]=await env.DB.batch(statements);
-  must(added.meta.changes===1&&consumed.meta.changes===1,"INVALID_OR_EXPIRED_PAIRING",403);
+  const [added,audited,consumed,updated]=await env.DB.batch(statements);
+  must(added.meta.changes===1&&audited.meta.changes===1&&consumed.meta.changes===1&&updated.meta.changes===1,
+    "INVALID_OR_EXPIRED_PAIRING",403);
   return response({node_id:id,command_signing_public_key:env.COMMAND_PUBLIC_KEY},201);
 }
 async function authenticated(req:Request,env:Env):Promise<Response>{
