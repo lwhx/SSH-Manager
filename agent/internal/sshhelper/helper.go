@@ -236,8 +236,8 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)(out Result){
   return fail("TARGET_USER_MISMATCH",nil)
  }
  result,err:=h.Install(account.HomeDir,uid,gid,payload.PublicKey,h.Config.SnapshotRoot)
- if err!=nil{return fail("KEY_INSTALL_FAILED",err)}
- if !result.FileChecked||result.Fingerprint!=fingerprint{return fail("KEY_INSTALL_NOT_VERIFIED",nil)}
+ if err!=nil{return fail("KEY_INSTALL_FAILED_MANUAL_REVIEW",err)}
+ if !result.FileChecked||result.Fingerprint!=fingerprint{return fail("KEY_INSTALL_NOT_VERIFIED_MANUAL_REVIEW",nil)}
  return Result{OK:true,Code:"DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",Detail:result}
 }
 func SafeUser(name string)bool{return accountRE.MatchString(name)}
