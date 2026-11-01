@@ -18,7 +18,8 @@ import {
  newCloudflareBootstrap,classifyWorkerForBootstrap,parseWranglerAuthToken
 } from "./cloudflare_native_lib.mjs";
 import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
- DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery} from "./native_security_helpers.mjs";
+ DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery,
+ UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight} from "./native_security_helpers.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
@@ -117,6 +118,16 @@ function buildAssets(){
  if(res.error||res.status!==0)throw Error("Control panel build failed");
  if(!existsSync(join(ROOT,"apps","console","dist","index.html")))
   throw Error("Built React assets are missing");
+}
+function assertNoDuplicateUnresolvedOperations(){
+ const raw=wrangler(["d1","execute","DB","--remote","--json",
+  "--config",CONFIG,"--command",UNRESOLVED_OPERATION_PREFLIGHT_SQL],{capture:true});
+ let parsed;
+ try{parsed=JSON.parse(raw);}catch{
+  throw Error("Staging D1 operation preflight failed: invalid Wrangler JSON response");
+ }
+ validateUnresolvedOperationPreflight(parsed);
+ console.log("[Staging] Read-only single-flight D1 operation preflight passed.");
 }
 function migrate(){
  wrangler(["d1","migrations","apply",DB,"--remote","--config",CONFIG]);
@@ -246,6 +257,7 @@ async function update(template,remote,dbs,id){
  writeConfig(cfg);
  console.log("[Staging] Reusing existing Worker, domains, Access, D1, DO and public signer.");
  originalSecretExists();
+ assertNoDuplicateUnresolvedOperations();
  migrate();
  deploy();
  console.log("UPDATE OK. No new D1 and no signing key rotation.");

@@ -84,3 +84,29 @@ export function validateDeletedWorkerStagingQuery(payload){
  }
  return {totalNodes:row.total_nodes};
 }
+
+
+// Read-only migration gate for an EXISTING Staging D1. The 0008 partial
+// unique index cannot be applied if historical unresolved operations overlap.
+// A non-empty, untrusted or malformed response always blocks deployment.
+export const UNRESOLVED_OPERATION_PREFLIGHT_SQL=[
+ "SELECT node_id, COUNT(*) AS unresolved_count",
+ "FROM operations",
+ "WHERE status IN ('CREATED','DISPATCHED','RUNNING')",
+ "GROUP BY node_id",
+ "HAVING COUNT(*) > 1",
+ "LIMIT 1"
+].join(" ");
+export function validateUnresolvedOperationPreflight(payload){
+ if(!Array.isArray(payload)||payload.length!==1||
+    payload[0]?.success!==true||!Array.isArray(payload[0]?.results)){
+  throw Error("Staging D1 operation preflight failed: incomplete or invalid read-only query");
+ }
+ if(payload[0].results.length!==0){
+  throw Error(
+   "Staging D1 operation preflight blocked: multiple unresolved operations on a VPS. "+
+   "Inspect the existing D1 and VPS manually; NEVER auto-delete or overwrite command history."
+  );
+ }
+ return true;
+}
