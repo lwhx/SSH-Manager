@@ -105,7 +105,7 @@ CHECKS = (
           "FROM node_ssh_proof_keys p WHERE NOT EXISTS "
           "(SELECT 1 FROM audit_logs a WHERE a.node_id=p.node_id "
           "AND a.actor_id=p.approved_by AND a.action='ssh.proof-key.pin' "
-          "AND a.result='ok')"),
+          "AND a.result='ok' AND a.created_at=p.created_at)"),
     Check("shared_root_proof_key", "FAIL", "Root proof key fingerprint reused across multiple VPS nodes",
           "FROM (SELECT fingerprint FROM node_ssh_proof_keys "
           "GROUP BY fingerprint HAVING COUNT(*)>1)"),
@@ -140,11 +140,16 @@ CHECKS = (
     Check("pending_inactive_daily_key", "FAIL", "PENDING challenge references inactive/stale daily key",
           "FROM ssh_verifications v WHERE v.status='PENDING' AND NOT EXISTS "
           "(SELECT 1 FROM public_keys k WHERE k.id=v.public_key_id "
-          "AND k.purpose='daily' AND k.active=1)"),
+          "AND k.purpose='daily' AND k.active=1 AND k.fingerprint=v.key_fingerprint)"),
     Check("pending_revision_mismatch", "FAIL", "PENDING challenge refers to superseded VPS configuration",
           "FROM ssh_verifications v JOIN nodes n ON n.id=v.node_id "
           "WHERE v.status='PENDING' AND "
           "(v.config_revision<>n.config_revision OR v.login_user<>n.login_user)"),
+    Check("pending_missing_installed_key", "FAIL", "PENDING challenge lacks its installed per-node daily key",
+          "FROM ssh_verifications v WHERE v.status='PENDING' AND NOT EXISTS "
+          "(SELECT 1 FROM node_keys nk WHERE nk.node_id=v.node_id "
+          "AND nk.public_key_id=v.public_key_id AND nk.login_user=v.login_user "
+          "AND nk.purpose='daily' AND nk.state='installed')"),
     Check("duplicate_key_version", "FAIL", "Public-key version reused within the same purpose",
           "FROM (SELECT purpose,version FROM public_keys "
           "GROUP BY purpose,version HAVING COUNT(*)>1)"),
@@ -154,7 +159,7 @@ CHECKS = (
           "FROM agent_credentials c WHERE c.revoked_at IS NULL AND NOT EXISTS "
           "(SELECT 1 FROM pairing_tokens p JOIN audit_logs a "
           "ON a.node_id=p.node_id AND a.actor_id=p.created_by "
-          "AND a.action='agent.pair' AND a.result='success' "
+          "AND a.action='agent.pair' AND a.result='success' AND a.created_at=c.paired_at "
           "WHERE p.node_id=c.node_id AND p.used_at=c.paired_at)"),
     Check("pending_challenge_present", "WARN", "Any PENDING challenge needs completion or manual review before release",
           "FROM ssh_verifications WHERE status='PENDING'"),
