@@ -201,6 +201,16 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         self.assertEqual(lookup["verified_missing_audit"]["count"], 1)
         self.assertEqual(lookup["verified_missing_installed_key"]["count"], 1)
 
+    def test_schema_requires_pairing_and_replay_nonce_tables(self):
+        for table in ("pairing_tokens", "device_nonces"):
+            with self.subTest(table=table):
+                self.db.execute("DROP TABLE " + table)
+                self.db.commit()
+                report, code = self.assess()
+                self.assertEqual(code, 2)
+                self.assertEqual(report["checks"][0]["id"], "required_schema")
+                self.setUp()
+
     def test_schema_rejects_wrong_or_nonunique_partial_index_definitions(self):
         definitions = (
             "CREATE UNIQUE INDEX idx_key_active ON public_keys(name) WHERE active=1",
