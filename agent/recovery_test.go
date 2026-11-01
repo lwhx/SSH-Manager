@@ -157,3 +157,38 @@ func TestRecoveryRejectsDifferentNodeAndUntrustedReceipt(t *testing.T){
  if err:=os.Symlink(filepath.Join(dir,other.ID+".json"),link);err!=nil{t.Fatal(err)}
  if _,err:=readClaimedOperation(link);err==nil{t.Fatal("accepted symlinked Agent receipt")}
 }
+
+func TestUndurableRootResultNeverBecomesTerminalFailure(t *testing.T){
+ a:=newRecoveryAgent(t,"https://127.0.0.1:1",&http.Client{Timeout:time.Second})
+ a.config.HelperSocket="/nonstandard/test-socket"
+ cmd:=Command{
+  ID:"70000000-0000-4000-8000-000000000001",
+  NodeID:a.config.NodeID,Action:"ssh.password.disable",
+  IssuedAt:time.Now().Unix(),
+ }
+ a.handleHelperResult(context.Background(),cmd,LocalHelperResult{
+  OK:false,Code:"ROOT_RESULT_NOT_DURABLE_MANUAL_REVIEW",
+ })
+ report:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+ if _,err:=os.Stat(report);!errors.Is(err,os.ErrNotExist){
+  t.Fatalf("non-durable Root journal response became a terminal Agent report: %v",err)
+ }
+}
+
+func TestDurableRootFailureStillBecomesTerminalFailure(t *testing.T){
+ a:=newRecoveryAgent(t,"https://127.0.0.1:1",&http.Client{Timeout:time.Second})
+ a.config.HelperSocket="/nonstandard/test-socket"
+ cmd:=Command{
+  ID:"80000000-0000-4000-8000-000000000001",
+  NodeID:a.config.NodeID,Action:"ssh.password.disable",
+  IssuedAt:time.Now().Unix(),
+ }
+ a.handleHelperResult(context.Background(),cmd,LocalHelperResult{
+  OK:false,Code:"PASSWORD_DISABLE_MANUAL_REVIEW",
+ })
+ path:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+ saved,_,err:=readOperationReport(path)
+ if err!=nil||saved.Status!="FAILED"||saved.ResultCode!="PASSWORD_DISABLE_MANUAL_REVIEW"{
+  t.Fatalf("durable helper failure was not preserved: %+v %v",saved,err)
+ }
+}
