@@ -57,6 +57,16 @@
 - [ ] **GET 只读**：重复读取过期、活动日常公钥已变化或配置版本不匹配的挑战，数据库原始记录与审计行数不变；响应只投影 EXPIRED/INVALIDATED。过期 PENDING 只能在受控写入路径安全清理。
 - [ ] **取消不等于终止 Agent 执行**：取消挑战后，已经 DISPATCHED/RUNNING 且回执未知的准备任务仍保持操作锁，不能将取消当作 Root 未执行命令的证据，也不得自动重派或回滚。
 
+## 4.2 Agent 终态回执与验证状态并发（必须先通过 local workerd + D1）
+
+- [ ] **同一终态回执并发**：对同一隔离节点、同一已派发的测试操作同时提交至少 5 份各自有效签名的相同 Agent 终态回执；数据库仅允许一次 `DISPATCHED/RUNNING → SUCCEEDED/FAILED`、一次终态审计。其余请求只允许返回对**完全相同**持久结果的幂等确认，不得再次下发或重放 SSH 指令。
+- [ ] **不同终态竞争**：同时上报不同 `result_code`、`detail` 或 `SUCCEEDED/FAILED`，只能有一个完整终态胜出。败方收到 `CONFLICTING_OPERATION_REPORT` 或不可重试的异常，不能写入额外审计或修改节点状态。
+- [ ] **终态 CAS 0 行**：对同一操作重复执行更新，`changes()=0` 必须在同一个 D1 batch 内触发 SQL 断言失败，使后续副作用和审计一起回滚，不能依靠提交之后检查 `meta.changes`。
+- [ ] **必要副作用缺失**：本地模拟签名验证准备 `prepared_at`、SSH policy 节点更新或日常公钥安装后节点阶段更新返回零行，整个 D1 batch 必须回滚；不可保留孤立 `SUCCEEDED`。
+- [ ] **审计失败**：仅在隔离 local D1 注入终态 `audit_logs` INSERT 错误，验证操作仍处于 `DISPATCHED/RUNNING`，节点配置、密钥安装和验证标记均未部分提交。不要对远程 Staging D1 或真实 VPS 注入写故障。
+- [ ] **取消后迟到的准备结果**：已取消/失效的 SSH 挑战不可凭迟到回执自动重新激活或变成 `VERIFIED`；若结果不可确认，保留单节点锁并走人工核查，不能自动解除阻塞。
+- [ ] **高危操作证明**：日常公钥写入以及手动密码/救援 SSH 操作，不能只凭 Agent 设备签名结束任务；必须验证对应 VPS 固定的 Root 独立签名和结果语义，无法证实“未写入”的故障保持未知状态。
+
 ## 5. 上线证据与拒绝条件
 
 每个用例记录测试日期、Git SHA、Staging 版本、测试节点 UUID、操作/挑战 ID、预期/实际结果及脱敏截图。禁止收集私钥、pairing token、challenge token、Cloudflare API token、Access Cookie 或完整敏感 SSH 配置。
