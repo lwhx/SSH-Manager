@@ -1,5 +1,6 @@
 import {describe,expect,it} from "vitest";
-import {findIdempotentOperation} from "./operationIdempotency";
+import {findIdempotentOperation,recoverIdempotentInsertConflict} from "./operationIdempotency";
+import {ApiError} from "../../../packages/protocol/src/index";
 
 const nodeA="11111111-1111-4111-8111-111111111111";
 const nodeB="22222222-2222-4222-8222-222222222222";
@@ -69,5 +70,50 @@ describe("idempotency tokens are scoped to one signed node command",()=>{
   const f=fixture(null);
   expect(await findIdempotentOperation(f.db,"actor","new-key",intent,at)).toBeNull();
   expect(f.queries).toHaveLength(1);
+ });
+});
+
+
+describe("concurrent idempotency insert collision is reconciled without redispatch",()=>{
+ const unique=new Error("D1_ERROR: UNIQUE constraint failed: operations.operator_id, operations.idempotency_key");
+ it("returns the existing operation when concurrent identical requests race",async()=>{
+  const f=fixture(operation({status:"RUNNING",expires_at:at+10}));
+  let reads=0;
+  const old=await recoverIdempotentInsertConflict(unique,async()=>{
+   reads++;return findIdempotentOperation(f.db,"actor","same-key",intent,at);
+  });
+  expect(old).toEqual({operation_id:id,status:"RUNNING"});
+  expect(reads).toBe(1);
+ });
+ it("handles a simultaneous identical request when the single-node index wins the race",async()=>{
+  const f=fixture(operation());
+  const prior=new ApiError("NODE_OPERATION_IN_PROGRESS",409);
+  expect(await recoverIdempotentInsertConflict(prior,
+   ()=>findIdempotentOperation(f.db,"actor","same-key",intent,at)))
+   .toEqual({operation_id:id,status:"RESULT_UNKNOWN"});
+ });
+ it("never accepts the same key used for a different node or payload",async()=>{
+  const f=fixture(operation());
+  await expect(recoverIdempotentInsertConflict(unique,
+   ()=>findIdempotentOperation(f.db,"actor","same-key",{...intent,nodeId:nodeB},at)))
+   .rejects.toMatchObject({code:"IDEMPOTENCY_SCOPE_CONFLICT",httpStatus:409});
+ });
+ it("never masks unrelated SQL errors and does not attempt a lookup",async()=>{
+  let calls=0;
+  const other=new Error("D1_ERROR: no such table: operations");
+  await expect(recoverIdempotentInsertConflict(other,async()=>{
+   calls++;return {operation_id:id,status:"SUCCEEDED"};
+  })).rejects.toBe(other);
+  expect(calls).toBe(0);
+ });
+ it("does not invent a successful result if the colliding operation cannot be found",async()=>{
+  const f=fixture(null);
+  await expect(recoverIdempotentInsertConflict(unique,
+   ()=>findIdempotentOperation(f.db,"actor","same-key",intent,at)))
+   .rejects.toBe(unique);
+ });
+ it("retains the original DB failure when collision lookup fails unexpectedly",async()=>{
+  await expect(recoverIdempotentInsertConflict(unique,async()=>{throw Error("D1_UNAVAILABLE");}))
+   .rejects.toBe(unique);
  });
 });
