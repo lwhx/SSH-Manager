@@ -35,7 +35,7 @@ describe("Owner-pinned Root trust anchor and audit must commit together",()=>{
   expect(f.batches).toHaveLength(1);
   expect(f.batches[0]).toHaveLength(3);
   const [write,audit]=f.batches[0];
-  expect(write.sql).toContain("INSERT OR IGNORE INTO node_ssh_proof_keys");
+  expect(write.sql).toContain("INSERT INTO node_ssh_proof_keys");
   expect(write.args).toEqual([pin.nodeId,pin.publicKey,pin.fingerprint,pin.actorId,pin.createdAt]);
   expect(audit.sql).toContain("INSERT INTO audit_logs");
   expect(audit.sql).toContain("'ssh.proof-key.pin'");
@@ -56,7 +56,7 @@ describe("Owner-pinned Root trust anchor and audit must commit together",()=>{
  });
  it("aborts the Root binding if the owner audit INSERT fails",async()=>{
   const failure=new Error("CI_ROOT_AUDIT_INSERT_FAILED");
-  const f=fixture([1,1],failure);
+  const f=fixture([1,1,0],failure);
   await expect(persistRootProofPin(f.db,pin)).rejects.toBe(failure);
   expect(f.batches).toHaveLength(1);
   expect(f.getIndependentWrites()).toBe(0);
