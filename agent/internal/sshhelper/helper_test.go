@@ -75,6 +75,8 @@ func validCommand(t *testing.T)Command{
 func TestSignedDailyInstallAndReplay(t *testing.T){
  key,pub:=makeSigner(t)
  h,calls:=newHandler(t,pub)
+ _,rootKey,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
+ h.ProofSigningKey=rootKey
  s:=signed(t,key,validCommand(t))
  got:=h.Execute(context.Background(),s)
  if !got.OK||got.Code!="DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF"{t.Fatalf("unexpected result: %+v",got)}
@@ -162,6 +164,8 @@ func TestDailyInstallUncertainAfterWriteNeverReportsDefiniteFailure(t *testing.T
  for _,tc:=range cases{
   t.Run(tc.name,func(t *testing.T){
    h,_:=newHandler(t,pub)
+   _,rootKey,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{t.Fatal(err)}
+   h.ProofSigningKey=rootKey
    marker:=filepath.Join(t.TempDir(),"simulated-authorized_keys")
    h.Install=func(home string,uid,gid int,key,snapshot string)(sshkeys.Result,error){
     if err:=os.WriteFile(marker,[]byte("public-key-written"),0600);err!=nil{

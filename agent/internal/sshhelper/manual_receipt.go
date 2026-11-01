@@ -37,14 +37,33 @@ func manualNoWriteFailure(code string)bool{
  }
  return false
 }
-// signManualReceipt binds a terminal result to the Root-only key.
+
+// Only rejections BEFORE the daily SSH key writer may attest no SSH change.
+// A failed snapshot, partial append, fsync error or file verification after
+// InstallDaily begins is never proof of no write.
+func dailyNoWriteFailure(code string)bool{
+ switch code{
+ case "SSHD_INSPECTION_FAILED","UNSUPPORTED_SSH_POLICY",
+  "DAILY_INSTALL_DISABLED","POLICY_REVISION_MISMATCH","INVALID_KEY_PAYLOAD",
+  "USER_OR_KEY_SCOPE_MISMATCH","INVALID_DAILY_KEY","KEY_FINGERPRINT_MISMATCH",
+  "TARGET_USER_MISSING","INVALID_USER_ID","INVALID_GROUP_ID",
+  "TARGET_USER_MISMATCH":
+  return true
+ }
+ return false
+}
+// signManualReceipt binds a terminal result (including daily key install)
+// to the pinned Root-only key. The Agent can relay but cannot forge it.
 // Failed signed receipts attest that the command never reached SSH writes.
 func (h *Handler) signManualReceipt(cmd Command, result Result)Result{
- if !isManualSSHAction(cmd.Action)||len(h.ProofSigningKey)!=ed25519.PrivateKeySize{
+ if !(isManualSSHAction(cmd.Action)||cmd.Action=="ssh.daily.install")||
+  len(h.ProofSigningKey)!=ed25519.PrivateKeySize{
   return fail("ROOT_MANUAL_RECEIPT_UNAVAILABLE",nil)
  }
  if !result.OK{
-  if !manualNoWriteFailure(result.Code){return result}
+  safe:=manualNoWriteFailure(result.Code)
+  if cmd.Action=="ssh.daily.install"{safe=dailyNoWriteFailure(result.Code)}
+  if !safe{return result}
   // Do not expose original stderr, paths, or account information.
   result.Detail=map[string]string{"code":result.Code}
  }
