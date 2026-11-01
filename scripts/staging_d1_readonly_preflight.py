@@ -135,9 +135,9 @@ CHECKS = (
           "ON a.node_id=p.node_id AND a.actor_id=p.created_by "
           "AND a.action='agent.pair' AND a.result='success' "
           "WHERE p.node_id=c.node_id AND p.used_at=c.paired_at)"),
-    Check("expired_pending_challenge", "WARN", "Any PENDING challenge needs completion or manual review before release",
+    Check("pending_challenge_present", "WARN", "Any PENDING challenge needs completion or manual review before release",
           "FROM ssh_verifications WHERE status='PENDING'"),
-    Check("expired_undispatched_operation", "WARN", "Any CREATED operation remains queued and needs explicit review",
+    Check("queued_operation_present", "WARN", "Any CREATED operation remains queued and needs explicit review",
           "FROM operations WHERE status='CREATED'"),
 )
 CHECKS_SQL = " UNION ALL ".join(
