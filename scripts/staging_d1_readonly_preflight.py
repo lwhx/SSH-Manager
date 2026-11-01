@@ -236,6 +236,28 @@ def local_query(connection: sqlite3.Connection, sql: str) -> list[dict[str, Any]
         raise ValueError("unapproved query")
     return [dict(row) for row in connection.execute(sql).fetchall()]
 
+def verify_reviewed_checkout(expected_sha: str, runner: Callable[..., Any] = subprocess.run) -> None:
+    """Refuse remote evidence from the wrong checkout or an edited preflight."""
+    if not COMMIT_SHA.fullmatch(expected_sha):
+        raise ValueError("Review commit must be a full 40-character Git SHA")
+    commands = (
+        (["git", "rev-parse", "HEAD"], "sha"),
+        (["git", "status", "--porcelain", "--", "scripts/staging_d1_readonly_preflight.py"], "dirty"),
+    )
+    for argv, kind in commands:
+        try:
+            result = runner(argv, cwd=str(ROOT), capture_output=True, text=True,
+                            check=False, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("Cannot verify reviewed Git checkout") from exc
+        if result.returncode != 0:
+            raise ValueError("Cannot verify reviewed Git checkout")
+        if kind == "sha" and result.stdout.strip().lower() != expected_sha.lower():
+            raise ValueError("Local HEAD differs from the approved Git commit")
+        if kind == "dirty" and result.stdout.strip():
+            raise ValueError("Local D1 preflight script differs from the reviewed Git commit")
+
+
 def staging_config(config: Path, confirmed_id: str) -> Path:
     if config.name != CONFIG_NAME or config.is_symlink() or not config.is_file():
         raise ValueError("Only the existing non-symlink single Staging config is allowed")
@@ -330,6 +352,7 @@ def main() -> int:
             not args.reviewed_commit or not COMMIT_SHA.fullmatch(args.reviewed_commit)):
             parser.error("remote mode requires --config, --confirm-database-id and 40-char --reviewed-commit")
         try:
+            verify_reviewed_checkout(args.reviewed_commit)
             config = staging_config(args.config, args.confirm_database_id)
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
