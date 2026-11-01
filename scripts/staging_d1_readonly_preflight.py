@@ -190,7 +190,7 @@ def validate_schema(row: dict[str, Any]) -> bool:
         ddl = row.get("index_ddl_" + index)
         if unique_partial != 1 or index_columns != columns or not isinstance(ddl, str):
             return False
-        normalized = re.sub(r"\\s+", " ", ddl.lower()).strip().rstrip(";")
+        normalized = re.sub(r"\s+", " ", ddl.lower()).strip().rstrip(";")
         expected = "on " + table + "(" + columns + ") where " + predicate.lower()
         if expected not in normalized:
             return False
