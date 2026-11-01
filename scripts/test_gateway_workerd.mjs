@@ -309,6 +309,39 @@ async function main(){
  assert.equal(rows[0].operation_status,"SUCCEEDED");
  assert(rows[0].prepared_at>0);
  
+ // Real workerd + D1: simultaneous signed Agent reports must commit exactly
+ // ONE terminal audit. A stale second CAS may only become an idempotent
+ // acknowledgement of the exact first result, never another audit/write.
+ const racingOp="e0000000-0000-4000-8000-000000000001";
+ const racingAt=Math.floor(Date.now()/1000);
+ const racingCommand=JSON.stringify({
+  v:1,id:racingOp,node_id:id.node,actor:id.actor,action:"node.preflight",
+  expected_revision:rev,issued_at:racingAt-3,expires_at:racingAt+45,
+  payload:{login_user:"root",ssh_port:22}
+ });
+ d1(["--command",insert("operations",[
+  "id","node_id","action","operator_id","idempotency_key","expected_revision",
+  "command_json","signature","status","created_at","expires_at"
+ ],[racingOp,id.node,"node.preflight",id.actor,"ci-race-"+racingOp,
+  rev,racingCommand,"ci-signed-command","DISPATCHED",racingAt-3,racingAt+45])]);
+ const raceReport={operation_id:racingOp,status:"SUCCEEDED",
+  result_code:"READ_ONLY_DIAGNOSTIC",detail:{check:"local-only",verified_login:false}};
+ const racing=await Promise.all(Array.from({length:5},()=>
+  send("/agent/v1/report",raceReport,device)));
+ for(const response of racing){
+  assert.equal(response.status,200,JSON.stringify(response.json));
+ }
+ const raceAudit=query("SELECT COUNT(*) AS n FROM audit_logs WHERE operation_id="+q(racingOp)+
+  " AND action='node.preflight' AND result='SUCCEEDED'")[0].n;
+ assert.equal(raceAudit,1,"concurrent terminal reports inserted duplicate audit rows");
+ const raceState=query("SELECT status FROM operations WHERE id="+q(racingOp))[0].status;
+ assert.equal(raceState,"SUCCEEDED");
+ expectCode(await send("/agent/v1/report",{
+  ...raceReport,detail:{check:"DIFFERENT"}
+ },device),409,"CONFLICTING_OPERATION_REPORT");
+ assert.equal(query("SELECT COUNT(*) AS n FROM audit_logs WHERE operation_id="+q(racingOp))[0].n,1,
+  "conflicting terminal replay inserted extra audit");
+
  // P4/P5: exercise the ACTUAL local Gateway and D1 with a per-node Root
  // operation receipt (the Agent only transports it, never signs it).
  const special={
