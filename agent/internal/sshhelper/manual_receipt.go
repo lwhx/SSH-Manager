@@ -17,17 +17,36 @@ type ManualOperationReceipt struct{
  ExpectedRevision string `json:"expected_revision"`
  DetailSHA256 string `json:"detail_sha256"`
  ExecutedAt int64 `json:"executed_at"`
+ NoSSHWrite bool `json:"no_ssh_write,omitempty"`
 }
 type SignedManualReceipt struct{
  Payload string `json:"payload"`
  Signature string `json:"signature"`
 }
-// signManualReceipt binds an immutable operation ID, command revision and
-// exact terminal output to the per-node Root proof key. The Agent only relays.
+// A no-write proof is permitted only for failures emitted before the SSH
+// mutator is invoked. Unknown/post-write failures must remain unresolved.
+// Keep this list synchronized with packages/protocol/src/manual.ts.
+func manualNoWriteFailure(code string)bool{
+ switch code{
+ case "SSHD_INSPECTION_FAILED","UNSUPPORTED_SSH_POLICY","POLICY_REVISION_MISMATCH",
+  "MANUAL_ACTOR_REQUIRED","MANUAL_PAYLOAD_INVALID","MANUAL_NODE_CONFIRMATION_REQUIRED",
+  "PASSWORD_DISABLE_LOCAL_LOCKED","FRESH_VERIFIED_LOGIN_REQUIRED",
+  "MANUAL_RESTORE_LOCAL_LOCKED","RESCUE_LOCAL_LOCKED","RESCUE_KEY_SCOPE_MISMATCH",
+  "RESCUE_KEY_INVALID","RESCUE_LOGIN_USER_INVALID":
+  return true
+ }
+ return false
+}
+// signManualReceipt binds a terminal result to the Root-only key.
+// Failed signed receipts attest that the command never reached SSH writes.
 func (h *Handler) signManualReceipt(cmd Command, result Result)Result{
- if !result.OK||!isManualSSHAction(cmd.Action)||
-  len(h.ProofSigningKey)!=ed25519.PrivateKeySize{
+ if !isManualSSHAction(cmd.Action)||len(h.ProofSigningKey)!=ed25519.PrivateKeySize{
   return fail("ROOT_MANUAL_RECEIPT_UNAVAILABLE",nil)
+ }
+ if !result.OK{
+  if !manualNoWriteFailure(result.Code){return result}
+  // Do not expose original stderr, paths, or account information.
+  result.Detail=map[string]string{"code":result.Code}
  }
  raw,err:=json.Marshal(result.Detail)
  if err!=nil||len(raw)>4096{return fail("ROOT_MANUAL_RESULT_TOO_LARGE",nil)}
@@ -36,6 +55,7 @@ func (h *Handler) signManualReceipt(cmd Command, result Result)Result{
   V:1,NodeID:cmd.NodeID,OperationID:cmd.ID,Action:cmd.Action,
   ResultCode:result.Code,ExpectedRevision:cmd.ExpectedRevision,
   DetailSHA256:hex.EncodeToString(digest[:]),ExecutedAt:h.Clock().Unix(),
+  NoSSHWrite:!result.OK,
  }
  if receipt.ExecutedAt<cmd.IssuedAt-10||receipt.ExecutedAt>cmd.ExpiresAt{
   return fail("ROOT_MANUAL_RECEIPT_OUTSIDE_COMMAND_WINDOW",errors.New("execution outside signed command lifetime"))
