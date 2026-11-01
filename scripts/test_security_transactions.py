@@ -141,6 +141,60 @@ class SecurityTransactions(unittest.TestCase):
             self.db.execute("SELECT status FROM ssh_verifications WHERE id=?",
                             (challenge,)).fetchone()[0], "PENDING")
 
+    def pin_root_proof_key(self, node_id: str, audit_id: str) -> tuple[int, int, int]:
+        inserted = self.db.execute(
+            "INSERT INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (node_id, "ssh-ed25519 fixture-public", "SHA256:fixture-root", OWNER, T),
+        )
+        audited = self.db.execute(
+            "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "
+            "SELECT ?,?,?, 'ssh.proof-key.pin',NULL,'ok',NULL,? WHERE changes()=1",
+            (audit_id, OWNER, node_id, T),
+        )
+        sentinel = self.db.execute(
+            "INSERT INTO manual_ssh_assertions(value) SELECT 0 WHERE changes()!=1"
+        )
+        return inserted.rowcount, audited.rowcount, sentinel.rowcount
+
+    def test_root_proof_pin_and_audit_are_one_fail_closed_transaction(self) -> None:
+        with self.db:
+            self.assertEqual(self.pin_root_proof_key(NODE, "root-pin-audit-1"), (1, 1, 0))
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM node_ssh_proof_keys WHERE node_id=?",
+                            (NODE,)).fetchone()[0], 1)
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM audit_logs WHERE action='ssh.proof-key.pin'").fetchone()[0],
+            1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.db:
+                self.pin_root_proof_key(NODE, "root-pin-audit-duplicate")
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM audit_logs WHERE action='ssh.proof-key.pin'").fetchone()[0],
+            1)
+
+        other = "90000000-0000-4000-8000-000000000001"
+        self.db.execute(
+            "INSERT INTO nodes(id,name,ssh_host,login_user,created_at) VALUES (?,?,?,?,?)",
+            (other, "fixture-root-pin-2", "192.0.2.11", "root", T),
+        )
+        self.db.executescript(
+            "CREATE TRIGGER ignore_root_pin_audit BEFORE INSERT ON audit_logs "
+            "WHEN NEW.action='ssh.proof-key.pin' "
+            "BEGIN SELECT RAISE(IGNORE); END;"
+        )
+        self.db.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.db:
+                self.pin_root_proof_key(other, "root-pin-audit-ignored")
+        self.assertIsNone(
+            self.db.execute("SELECT node_id FROM node_ssh_proof_keys WHERE node_id=?",
+                            (other,)).fetchone(),
+            "a zero-row audit must roll back the new Root trust anchor")
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM audit_logs WHERE action='ssh.proof-key.pin'").fetchone()[0],
+            1)
+
     def issue_token(self, token_id: str, token_hash: str, audit_id: str) -> None:
         # Mirrors apps/control-worker/src/identityLinkStore.ts.
         with self.db:
