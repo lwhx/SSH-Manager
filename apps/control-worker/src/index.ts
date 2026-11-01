@@ -1,6 +1,7 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate,persistNodeSettingsUpdate} from "./nodeMetadata";
 import {requirePinnedRootForDailyInstall} from "./dailyKeyProofPolicy";
+import {persistRootProofPin} from "./rootProofPin";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
@@ -245,12 +246,10 @@ async function handle(req:Request,env:Env):Promise<Response>{
       const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",Uint8Array.from(raw)));
       const fingerprint="SHA256:"+btoa(String.fromCharCode(...digest)).replace(/=+$/,"");
       ensure(b.confirm_fingerprint===fingerprint,"PROOF_FINGERPRINT_CONFIRMATION_REQUIRED",403);
-      const result=await env.DB.prepare(
-        "INSERT OR IGNORE INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at) "+
-        "VALUES (?,?,?,?,?)"
-      ).bind(node.id,publicKey,fingerprint,a.id,now()).run();
-      ensure(result.meta.changes===1,"NODE_PROOF_KEY_ALREADY_PINNED",409);
-      await audit(env,a,node.id,"ssh.proof-key.pin","ok");
+      await persistRootProofPin(env.DB,{
+        nodeId:node.id,publicKey,fingerprint,actorId:a.id,
+        auditId:crypto.randomUUID(),createdAt:now()
+      });
       return response({node_id:node.id,fingerprint,pinned:true},201);
     }
     if(sub==="preflight"&&req.method==="POST"){
