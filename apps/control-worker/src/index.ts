@@ -1,5 +1,6 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate,persistNodeSettingsUpdate} from "./nodeMetadata";
+import {requirePinnedRootForDailyInstall} from "./dailyKeyProofPolicy";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
@@ -262,6 +263,9 @@ async function handle(req:Request,env:Env):Promise<Response>{
     }
     if(sub==="daily-key/install"&&req.method==="POST"){
       needRole(a,"admin");
+      // First pin the Root trust key on this exact VPS. The Agent cannot
+      // register or replace it and must not act as its own SSH write proof.
+      await requirePinnedRootForDailyInstall(env.DB,node.id);
       // The Agent must still reject privileged SSH writes while the P3 helper
       // and authenticated login-proof workflow are incomplete.
       const key=await env.DB.prepare("SELECT * FROM public_keys WHERE purpose='daily' AND active=1").first<any>();
