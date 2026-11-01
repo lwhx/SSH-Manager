@@ -8,6 +8,7 @@
 - GitHub Actions 的常规 CI 必须通过：Go go test -race ./...、go vet、Root Helper 测试、TS check、Vitest、SQLite migrations、local workerd + D1、隔离 OpenSSH 回环新连接。
 - 手动 `workflow_dispatch` 的打包工作流仅生成 Linux amd64/arm64 二进制与 SHA256SUMS，不部署 VPS、Cloudflare 或自动发布生产版本。
 - 产物校验通过哈希和可信 GitHub Actions 运行来源，不将 SHA256SUMS 误称为数字签名。正式版本还需要组织批准的签名与可重复构建策略。
+- **依赖可复现性仍是发布阻断项**：当前仓库尚无 `package-lock.json`，CI 使用 `npm install` 会动态解析传递依赖。正式合并/发布前必须由受信任环境生成并审查 lockfile，将 CI 改为 `npm ci`，校验依赖完整性与 SBOM；`rollup` 临时版本覆盖不能代替完整 lockfile。
 
 ## 2. 发行版兼容性矩阵
 
