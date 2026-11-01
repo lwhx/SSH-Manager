@@ -9,7 +9,7 @@ export interface RootProofPin {
  createdAt:number;
 }
 function isPinnedNodeConflict(error:unknown):boolean {
- const pattern=/UNIQUE constraint failed:\\s*node_ssh_proof_keys\\.node_id\\b/i;
+ const pattern=/UNIQUE constraint failed:\s*node_ssh_proof_keys\.node_id\b/i;
  let candidate:unknown=error;
  for(let i=0;i<5;i++){
   if(typeof candidate==="string")return pattern.test(candidate);
