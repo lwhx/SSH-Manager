@@ -110,7 +110,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
             "expected_revision,command_json,signature,status,created_at,expires_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             ("op1", NODE, "node.preflight", OWNER, "idem-op1", REVISION,
-             "{}", "test-signature", "DISPATCHED", 1, 2),
+             "{}", "test-signature", "DISPATCHED", 1, 9999999999),
         )
         self.db.commit()
         report, code = self.assess()
@@ -152,7 +152,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
             "expected_revision,command_json,signature,status,created_at,expires_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             ("op2", NODE, "node.preflight", OWNER, "idem-op2", REVISION,
-             "{}", "fixture", "CREATED", 1, 2),
+             "{}", "fixture", "CREATED", 1, 9999999999),
         )
         self.db.commit()
         report, code = self.assess()
@@ -236,7 +236,13 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
                 "AGENT_HOSTNAME": "agent-staging.example.invalid",
                 "MANUAL_SSH_ACTIONS_ENABLED": "false",
             },
-            "d1_databases": [{
+            "routes": [
+                {"pattern": "ssh-staging.example.invalid", "custom_domain": True},
+                {"pattern": "agent-staging.example.invalid", "custom_domain": True},
+            ],
+            "assets": {"directory": "./apps/console/dist", "binding": "ASSETS",
+                       "run_worker_first": True},
+            "d1_databases": [{}
                 "binding": "DB", "database_name": "ssh-manager-staging",
                 "database_id": UUID,
             }]
@@ -247,12 +253,14 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
 
     def test_staging_target_requires_exact_name_binding_and_uuid(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / preflight.CONFIG_NAME
+            root = Path(tmp)
+            path = root / preflight.CONFIG_NAME
             data = self.safe_config(path)
-            self.assertEqual(preflight.staging_config(path, UUID), path.resolve())
-            with self.assertRaises(ValueError):
-                preflight.staging_config(path, OTHER_UUID)
-            for modification in (
+            with patch.object(preflight, "ROOT", root):
+                self.assertEqual(preflight.staging_config(path, UUID), path.resolve())
+                with self.assertRaises(ValueError):
+                    preflight.staging_config(path, OTHER_UUID)
+                for modification in (
                 lambda c: c["vars"].update(MANUAL_SSH_ACTIONS_ENABLED="true"),
                 lambda c: c.update(name="ssh-manager"),
                 lambda c: c["d1_databases"][0].update(database_name="production"),
@@ -262,14 +270,19 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
                 changed = json.loads(json.dumps(data))
                 modification(changed)
                 path.write_text(json.dumps(changed), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        preflight.staging_config(path, UUID)
+                outside = root.parent / preflight.CONFIG_NAME
+                self.safe_config(outside)
                 with self.assertRaises(ValueError):
-                    preflight.staging_config(path, UUID)
+                    preflight.staging_config(outside, UUID)
 
     def test_wrangler_failures_fail_closed(self):
         for payload in (
             "not-json", "[]", "[{}]",
             '[{"success":false,"results":[]}]',
             '[{"success":true,"results":null}]',
+            '[{"success":true,"errors":[{"message":"failed"}],"results":[]}]',
             '[{"success":true,"results":[{"n":"secret"}]},'
         ):
             with self.subTest(payload=payload):
@@ -315,6 +328,65 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
             self.assertFalse(opts.get("shell", False))
             self.assertTrue(preflight.SCHEMA_SQL.startswith("SELECT "))
 
+    def test_any_dispatched_or_running_operation_blocks_even_before_expiry(self):
+        self.db.execute(
+            "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,"
+            "expected_revision,command_json,signature,status,created_at,expires_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("live-op", NODE, "node.preflight", OWNER, "live-op", REVISION,
+             "{}", "fixture", "DISPATCHED", 1, 9999999999),
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["unknown_terminal_result"]["count"], 1)
+        self.db.execute("UPDATE operations SET status='RUNNING' WHERE id='live-op'")
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["unknown_terminal_result"]["count"], 1)
+
+    def test_agent_pair_audit_must_match_issuing_owner_and_token_use(self):
+        self.db.execute(
+            "INSERT INTO agent_credentials(node_id,public_key,paired_at,revoked_at) "
+            "VALUES (?,?,?,NULL)", (NODE, "device-public-fixture", 50)
+        )
+        self.db.execute(
+            "INSERT INTO pairing_tokens(id,node_id,token_hash,expires_at,used_at,created_by) "
+            "VALUES (?,?,?,?,?,?)", ("pair-token", NODE, "hash", 60, 50, OWNER)
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["active_credential_missing_pair_audit"]["count"], 1)
+        self.db.execute(
+            "INSERT INTO audit_logs(id,actor_id,node_id,action,result,created_at) "
+            "VALUES (?,?,?,?,?,?)", ("pair-audit", OWNER, NODE, "agent.pair", "success", 50)
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(self.statuses(report)["active_credential_missing_pair_audit"]["count"], 0)
+
+    def test_same_root_proof_fingerprint_cannot_be_reused_across_nodes(self):
+        self.db.execute(
+            "INSERT INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at) "
+            "VALUES (?,?,?,?,?)", (NODE, "key-one", "SHA256:same", OWNER, 50)
+        )
+        other = "20000000-0000-4000-8000-000000000002"
+        self.db.execute(
+            "INSERT INTO nodes(id,name,ssh_host,login_user,status,init_stage,config_revision,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)", (other, "fixture2", "192.0.2.11", "root", "online",
+                "WAITING_VERIFICATION", REVISION, 10)
+        )
+        self.db.execute(
+            "INSERT INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at) "
+            "VALUES (?,?,?,?,?)", (other, "key-two-format", "SHA256:same", OWNER, 51)
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["shared_root_proof_key"]["count"], 1)
+
     def test_constant_query_allowlist_has_no_write_statement(self):
         preflight.assert_fixed_read_queries()
         for sql in (preflight.SCHEMA_SQL, preflight.CHECKS_SQL):
@@ -339,8 +411,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         preflight.verify_reviewed_checkout(expected, clean_runner)
         self.assertEqual(calls, [
             ["git", "rev-parse", "HEAD"],
-            ["git", "status", "--porcelain", "--",
-             "scripts/staging_d1_readonly_preflight.py"],
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
         ])
 
         def wrong_commit(argv, **kwargs):
@@ -352,7 +423,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         def dirty_script(argv, **kwargs):
             return SimpleNamespace(
                 returncode=0,
-                stdout=expected + "\n" if argv[1] == "rev-parse" else " M scripts/staging_d1_readonly_preflight.py\n",
+                stdout=expected + "\n" if argv[1] == "rev-parse" else " M apps/control-worker/src/index.ts\n",
             )
 
         with self.assertRaises(ValueError):
