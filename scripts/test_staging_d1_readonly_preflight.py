@@ -325,6 +325,43 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
                 sql, re.I
             ))
 
+    def test_remote_evidence_must_match_clean_reviewed_git_checkout(self):
+        expected = "a" * 40
+        calls = []
+
+        def clean_runner(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(
+                returncode=0,
+                stdout=expected + "\n" if argv[1] == "rev-parse" else "",
+            )
+
+        preflight.verify_reviewed_checkout(expected, clean_runner)
+        self.assertEqual(calls, [
+            ["git", "rev-parse", "HEAD"],
+            ["git", "status", "--porcelain", "--",
+             "scripts/staging_d1_readonly_preflight.py"],
+        ])
+
+        def wrong_commit(argv, **kwargs):
+            return SimpleNamespace(returncode=0, stdout="b" * 40 + "\n")
+
+        with self.assertRaises(ValueError):
+            preflight.verify_reviewed_checkout(expected, wrong_commit)
+
+        def dirty_script(argv, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=expected + "\n" if argv[1] == "rev-parse" else " M scripts/staging_d1_readonly_preflight.py\n",
+            )
+
+        with self.assertRaises(ValueError):
+            preflight.verify_reviewed_checkout(expected, dirty_script)
+
+        with self.assertRaises(ValueError):
+            preflight.verify_reviewed_checkout("not-a-full-sha", clean_runner)
+
+
 
 if __name__ == "__main__":
     unittest.main()
