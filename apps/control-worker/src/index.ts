@@ -355,7 +355,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
       return response({verification_id:id,token,expires_at:expires,login_user:node.login_user,
         fingerprint:key.fingerprint,status:"PENDING",preparation:"QUEUED",preparation_operation_id:operationId, trusted_proof_available:false},201);
     }
-    const verificationMatch=/^ssh-verification\\/([0-9a-f-]{36})(?:\\/cancel)?$/.exec(sub);
+    const verificationMatch=/^ssh-verification\/([0-9a-f-]{36})(?:\/cancel)?$/.exec(sub);
     if(verificationMatch){
       needRole(a,"admin");
       const verification=await env.DB.prepare(
