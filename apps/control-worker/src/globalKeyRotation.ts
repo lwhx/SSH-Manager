@@ -42,7 +42,7 @@ export async function rotateGlobalPublicKey(db:D1Database,key:GlobalKeyRotation)
  const audited=results[results.length-2];
  const row=results[results.length-1]?.results?.[0] as {version?:number;active?:number}|undefined;
  if(inserted?.meta?.changes!==1||audited?.meta?.changes!==1||
-  row?.active!==1||!Number.isSafeInteger(row.version)||Number(row.version)<1){
+  row?.active!==1||!Number.isSafeInteger(Number(row?.version))||Number(row.version)<1){
   throw new ApiError("GLOBAL_KEY_ROTATION_NOT_CONFIRMED",500);
  }
  return Number(row.version);
