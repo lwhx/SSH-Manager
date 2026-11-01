@@ -10,7 +10,7 @@
 - `--sqlite-snapshot` 使用 `mode=ro&immutable=1` 与 `PRAGMA query_only=ON` 检查已准备好的**一致性本地快照**。不要直接复制仍在 WAL 写入中的在线数据库文件。
 - 远程模式必须明确提供 `--staging-only --execute-remote --config --confirm-database-id --reviewed-commit`，校验现有生成配置的 Worker、D1 绑定 UUID、双 Staging 域名与 `MANUAL_SSH_ACTIONS_ENABLED=false`。
 - 远程仅调用项目中安装的 Wrangler：`d1 execute ssh-manager-staging --config ... --remote --json --command <固定 SELECT>`。不接受用户 SQL，不执行迁移、部署、导出、SSH 写入、批量公钥设置或自动回滚。
-- 实际操作前，Owner 必须从 Cloudflare 控制台**独立核对当前账户、Worker 的真实 D1 绑定和 Staging 数据库 UUID**。本脚本不能替代该核对，也不能证明远端 Worker 与本地配置一致。
+- 远程模式还会用只读 Git 命令核对当前 `HEAD` 必须等于 `--reviewed-commit`，并拒绝已在本地改动过的预检脚本。实际操作前，Owner 必须从 Cloudflare 控制台**独立核对当前账户、Worker 的真实 D1 绑定和 Staging 数据库 UUID**；本脚本不能替代该核对，也不能证明远端 Worker 与本地配置一致。
 
 Cloudflare 的 `d1 execute` 是通用 SQL 执行命令。即使本脚本固定只读 SELECT，仍建议操作账户使用能完成诊断的最小权限；不要因为预检失败就自动扩大权限。绝不把 Token 放进命令行或聊天消息。
 
