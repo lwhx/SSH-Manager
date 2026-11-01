@@ -334,14 +334,15 @@ async function main(){
     "signed-command-fixture","DISPATCHED",tick-5,tick+45])]);
   return command;
  }
- async function rootTerminal(command,resultCode,result){
+ async function rootTerminal(command,resultCode,result,{failed=false,noWrite=false}={}){
   const receipt={v:1,node_id:id.node,operation_id:command.id,
    action:command.action,result_code:resultCode,
    expected_revision:command.expected_revision,
    detail_sha256:createHash("sha256").update(JSON.stringify(result)).digest("hex"),
    executed_at:command.issued_at+5};
+  if(noWrite)receipt.no_ssh_write=true;
   const payload=JSON.stringify(receipt);
-  return {operation_id:command.id,status:"SUCCEEDED",result_code:resultCode,
+  return {operation_id:command.id,status:failed?"FAILED":"SUCCEEDED",result_code:resultCode,
    detail:{result,root_receipt:{payload,
     signature:toURL(await webcrypto.subtle.sign("Ed25519",rootKey.privateKey,
       new TextEncoder().encode(payload)))}}};
@@ -370,17 +371,32 @@ async function main(){
   "invalid snapshot must abort the full D1 transaction");
  assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
   "DISPATCHED","D1 committed failed snapshot transition");
- // Local fixture only: the synthetic bad snapshot did not perform an SSH
- // write. Submit an explicit terminal failure instead of silently expiring
- // an ambiguous DISPATCHED operation to unlock the next test case.
- const terminated=await send("/agent/v1/report",{
-  operation_id:special.badRestore,status:"FAILED",
-  result_code:"ROOT_OPERATION_FAILED",
-  detail:{reason:"test fixture rejected snapshot; no SSH side effect"}
- },device);
+ // Agent-authenticated FAILED MUST NOT release this VPS without an
+ // independently signed Root receipt attesting that no SSH write occurred.
+ const failedUnsigned={operation_id:special.badRestore,status:"FAILED",
+  result_code:"MANUAL_NODE_CONFIRMATION_REQUIRED",
+  detail:{result:{code:"MANUAL_NODE_CONFIRMATION_REQUIRED"}}};
+ expectCode(await send("/agent/v1/report",failedUnsigned,device),403,"ROOT_MANUAL_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
+  "DISPATCHED","unsigned FAILED released a VPS operation lock");
+ // A forged valid signature for a potentially partial write must also fail
+ // the Gateway's strict no-write result-code allowlist.
+ const signedAmbiguous=await rootTerminal(invalid,"PASSWORD_DISABLE_MANUAL_REVIEW",
+  {code:"PASSWORD_DISABLE_MANUAL_REVIEW"},{failed:true,noWrite:true});
+ expectCode(await send("/agent/v1/report",signedAmbiguous,device),403,"ROOT_MANUAL_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
+  "DISPATCHED","signed ambiguous result released a VPS lock");
+ // The local-only fixture never touched SSH. A signed prewrite failure can
+ // safely close the synthetic operation, with the same Root proof key.
+ const trustedNoWrite=await rootTerminal(invalid,"MANUAL_NODE_CONFIRMATION_REQUIRED",
+  {code:"MANUAL_NODE_CONFIRMATION_REQUIRED"},{failed:true,noWrite:true});
+ const terminated=await send("/agent/v1/report",trustedNoWrite,device);
  assert.equal(terminated.status,200,JSON.stringify(terminated.json));
  assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
-  "FAILED","explicit failure should close the synthetic fixture only");
+  "FAILED","trusted Root prewrite failure should release the fixture");
+ const duplicate=await send("/agent/v1/report",trustedNoWrite,device);
+ assert.equal(duplicate.status,200,JSON.stringify(duplicate.json));
+ assert.equal(duplicate.json.idempotent,true);
  const restore=addManual(special.restore,"ssh.password.restore",changedRev,
   {snapshot_ref:snapshot});
  const restoreReport=await rootTerminal(restore,"PASSWORD_POLICY_RESTORED",{
