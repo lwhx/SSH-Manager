@@ -1,0 +1,330 @@
+"""Read-only D1 preflight tests; no Cloudflare credentials or network calls."""
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import re
+import sqlite3
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parent / "staging_d1_readonly_preflight.py"
+spec = importlib.util.spec_from_file_location("staging_d1_readonly_preflight", SCRIPT)
+assert spec and spec.loader
+preflight = importlib.util.module_from_spec(spec)
+import sys
+sys.modules[spec.name] = preflight
+spec.loader.exec_module(preflight)
+
+MIGRATIONS = SCRIPT.parents[1] / "packages" / "db" / "migrations"
+UUID = "1e000000-0000-4000-8000-000000000001"
+OTHER_UUID = "1e000000-0000-4000-8000-000000000002"
+NODE = "20000000-0000-4000-8000-000000000001"
+OWNER = "30000000-0000-4000-8000-000000000001"
+KEY = "40000000-0000-4000-8000-000000000001"
+REVISION = "a" * 64
+
+
+class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys=ON")
+        for file in sorted(MIGRATIONS.glob("*.sql")):
+            self.db.executescript(file.read_text(encoding="utf-8"))
+        self.db.execute(
+            "INSERT INTO users(id,email,role,status,created_at) VALUES (?,?,?,?,?)",
+            (OWNER, "owner@fixture.invalid", "owner", "active", 10),
+        )
+        self.db.execute(
+            "INSERT INTO nodes(id,name,ssh_host,login_user,status,init_stage,"
+            "config_revision,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (NODE, "fixture", "192.0.2.10", "root", "online",
+             "WAITING_VERIFICATION", REVISION, 10),
+        )
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+
+    def assess(self):
+        return preflight.evaluate(
+            lambda sql: preflight.local_query(self.db, sql), "test_snapshot"
+        )
+
+    def statuses(self, report):
+        return {c["id"]: c for c in report["checks"]}
+
+    def seed_daily(self):
+        self.db.execute(
+            "INSERT INTO public_keys(id,purpose,name,algorithm,public_key,"
+            "fingerprint,version,active,created_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?,1,?,?)",
+            (KEY, "daily", "fixture", "ssh-ed25519", "test-key",
+             "SHA256:fixture", 1, OWNER, 10),
+        )
+        self.db.commit()
+
+    def test_empty_migrated_staging_is_clean_but_not_ssh_verified(self):
+        report, exit_code = self.assess()
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(report["preflight_ready"])
+        self.assertFalse(report["real_ssh_authentication_verified"])
+        self.assertFalse(report["remote_deployment_performed"])
+        self.assertEqual(report["fail_count"], 0)
+        self.assertEqual(report["warn_count"], 0)
+        self.assertEqual(len(report["checks"]), len(preflight.CHECKS) + 1)
+        self.assertNotIn("owner@fixture.invalid", json.dumps(report))
+        self.assertNotIn(NODE, json.dumps(report))
+
+    def test_missing_root_pin_audit_blocks_and_no_key_data_leaks(self):
+        self.db.execute(
+            "INSERT INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at)"
+            " VALUES (?,?,?,?,?)",
+            (NODE, "this-is-an-intentionally-sensitive-test-public-key",
+             "SHA256:root-fixture", OWNER, 50),
+        )
+        self.db.commit()
+        report, exit_code = self.assess()
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(self.statuses(report)["root_pin_missing_audit"]["count"], 1)
+        self.assertFalse(report["preflight_ready"])
+        self.assertNotIn("this-is-an-intentionally-sensitive-test-public-key",
+                         json.dumps(report))
+        self.db.execute(
+            "INSERT INTO audit_logs(id,actor_id,node_id,action,result,created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            ("audit-pin", OWNER, NODE, "ssh.proof-key.pin", "ok", 50),
+        )
+        self.db.commit()
+        report, exit_code = self.assess()
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.statuses(report)["root_pin_missing_audit"]["count"], 0)
+
+    def test_terminal_without_audit_and_expired_dispatched_fails_closed(self):
+        self.db.execute(
+            "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,"
+            "expected_revision,command_json,signature,status,created_at,expires_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("op1", NODE, "node.preflight", OWNER, "idem-op1", REVISION,
+             "{}", "test-signature", "DISPATCHED", 1, 2),
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["unknown_terminal_result"]["count"], 1)
+        self.db.execute(
+            "UPDATE operations SET status='SUCCEEDED',finished_at=5 WHERE id='op1'"
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["terminal_missing_audit"]["count"], 1)
+        self.db.execute(
+            "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,created_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            ("audit-one", OWNER, NODE, "node.preflight", "op1", "SUCCEEDED", 5),
+        )
+        self.db.execute(
+            "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,created_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            ("audit-two", OWNER, NODE, "node.preflight", "op1", "SUCCEEDED", 5),
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.statuses(report)["terminal_duplicate_audit"]["count"], 1)
+
+    def test_expired_created_and_pending_are_warnings_not_approval(self):
+        self.seed_daily()
+        self.db.execute(
+            "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,"
+            "config_revision,nonce_hash,status,created_at,expires_at,public_key_id,issued_by)"
+            " VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)",
+            ("challenge-1", NODE, "SHA256:fixture", "root", REVISION, "hash",
+             1, 2, KEY, OWNER),
+        )
+        self.db.execute(
+            "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,"
+            "expected_revision,command_json,signature,status,created_at,expires_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("op2", NODE, "node.preflight", OWNER, "idem-op2", REVISION,
+             "{}", "fixture", "CREATED", 1, 2),
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 3)
+        self.assertEqual(report["fail_count"], 0)
+        self.assertEqual(report["warn_count"], 2)
+        self.assertFalse(report["preflight_ready"])
+
+    def test_verified_without_root_proof_or_audit_blocks(self):
+        self.seed_daily()
+        self.db.execute(
+            "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,"
+            "config_revision,nonce_hash,status,created_at,expires_at,public_key_id,"
+            "issued_by,verified_at) VALUES (?,?,?,?,?,?,'VERIFIED',?,?,?,?,?)",
+            ("challenge-2", NODE, "SHA256:fixture", "root", REVISION, "hash",
+             1, 300, KEY, OWNER, 50),
+        )
+        self.db.commit()
+        report, code = self.assess()
+        self.assertEqual(code, 2)
+        lookup = self.statuses(report)
+        self.assertEqual(lookup["verified_incomplete_proof"]["count"], 1)
+        self.assertEqual(lookup["verified_missing_audit"]["count"], 1)
+        self.assertEqual(lookup["verified_missing_installed_key"]["count"], 1)
+
+    def test_missing_schema_blocks_without_reading_undeclared_tables(self):
+        empty = sqlite3.connect(":memory:")
+        empty.row_factory = sqlite3.Row
+        try:
+            calls = []
+            def query(sql):
+                calls.append(sql)
+                return preflight.local_query(empty, sql)
+            report, code = preflight.evaluate(query, "empty")
+            self.assertEqual(code, 2)
+            self.assertFalse(report["preflight_ready"])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(report["checks"][0]["id"], "required_schema")
+        finally:
+            empty.close()
+
+    def test_incomplete_aggregate_response_fails_closed_and_redacts(self):
+        def malicious(query):
+            if query == preflight.SCHEMA_SQL:
+                return preflight.local_query(self.db, query)
+            return [{"check_id": "root_pin_missing_audit",
+                     "n": "SECRET do not include in response"}]
+        report, code = preflight.evaluate(malicious, "fake")
+        self.assertEqual(code, 2)
+        self.assertFalse(report["preflight_ready"])
+        self.assertNotIn("SECRET", json.dumps(report))
+
+    def test_snapshot_is_immutable_and_query_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "staging.sqlite"
+            destination = sqlite3.connect(path)
+            for file in sorted(MIGRATIONS.glob("*.sql")):
+                destination.executescript(file.read_text(encoding="utf-8"))
+            destination.close()
+            read_only = preflight.open_snapshot(path)
+            try:
+                self.assertTrue(preflight.validate_schema(
+                    preflight.local_query(read_only, preflight.SCHEMA_SQL)[0]
+                ))
+                with self.assertRaises(sqlite3.OperationalError):
+                    read_only.execute(
+                        "INSERT INTO users(id,email,role,status,created_at) "
+                        "VALUES ('id','email','owner','active',1)"
+                    )
+                with self.assertRaises(ValueError):
+                    preflight.local_query(read_only, "DELETE FROM users")
+            finally:
+                read_only.close()
+
+    def safe_config(self, path):
+        data = {
+            "name": "ssh-manager-staging", "workers_dev": False,
+            "preview_urls": False,
+            "vars": {
+                "CONTROL_HOSTNAME": "ssh-staging.example.invalid",
+                "AGENT_HOSTNAME": "agent-staging.example.invalid",
+                "MANUAL_SSH_ACTIONS_ENABLED": "false",
+            },
+            "d1_databases": [{
+                "binding": "DB", "database_name": "ssh-manager-staging",
+                "database_id": UUID,
+            }]
+        }
+        path.write_text(json.dumps(data), encoding="utf-8")
+        path.chmod(0o600)
+        return data
+
+    def test_staging_target_requires_exact_name_binding_and_uuid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / preflight.CONFIG_NAME
+            data = self.safe_config(path)
+            self.assertEqual(preflight.staging_config(path, UUID), path.resolve())
+            with self.assertRaises(ValueError):
+                preflight.staging_config(path, OTHER_UUID)
+            for modification in (
+                lambda c: c["vars"].update(MANUAL_SSH_ACTIONS_ENABLED="true"),
+                lambda c: c.update(name="ssh-manager"),
+                lambda c: c["d1_databases"][0].update(database_name="production"),
+                lambda c: c["vars"].update(CONTROL_HOSTNAME="ssh.example.invalid"),
+                lambda c: c.update(env={"production": {}}),
+            ):
+                changed = json.loads(json.dumps(data))
+                modification(changed)
+                path.write_text(json.dumps(changed), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    preflight.staging_config(path, UUID)
+
+    def test_wrangler_failures_fail_closed(self):
+        for payload in (
+            "not-json", "[]", "[{}]",
+            '[{"success":false,"results":[]}]',
+            '[{"success":true,"results":null}]',
+            '[{"success":true,"results":[{"n":"secret"}]},'
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    preflight.parse_wrangler_json(payload)
+        self.assertEqual(
+            preflight.parse_wrangler_json(
+                '[{"success":true,"results":[{"check_id":"a","n":0}]}]'
+            ), [{"check_id": "a", "n": 0}]
+        )
+
+    def test_remote_runner_only_receives_allowlisted_select_without_shell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "node_modules" / "wrangler" / "bin" / "wrangler.js"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("// dummy")
+            config = root / preflight.CONFIG_NAME
+            self.safe_config(config)
+            commands = []
+            def fake_runner(argv, **kwargs):
+                commands.append((argv, kwargs))
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([{"success": True, "results": [{"dummy": 1}]}]),
+                    stderr="",
+                )
+            with patch.object(preflight, "ROOT", root), patch.object(
+                preflight.shutil, "which", return_value="/usr/bin/node"
+            ):
+                rows = preflight.remote_query(config, preflight.SCHEMA_SQL, fake_runner)
+                self.assertEqual(rows, [{"dummy": 1}])
+                with self.assertRaises(ValueError):
+                    preflight.remote_query(config, "DROP TABLE users", fake_runner)
+            self.assertEqual(len(commands), 1)
+            argv, opts = commands[0]
+            self.assertEqual(argv[2:5], ["d1", "execute", "ssh-manager-staging"])
+            self.assertIn("--remote", argv)
+            self.assertIn("--json", argv)
+            self.assertEqual(argv[argv.index("--command")+1], preflight.SCHEMA_SQL)
+            self.assertNotIn("--file", argv)
+            self.assertNotIn("--yes", argv)
+            self.assertFalse(opts.get("shell", False))
+            self.assertTrue(preflight.SCHEMA_SQL.startswith("SELECT "))
+
+    def test_constant_query_allowlist_has_no_write_statement(self):
+        preflight.assert_fixed_read_queries()
+        for sql in (preflight.SCHEMA_SQL, preflight.CHECKS_SQL):
+            self.assertEqual(sql[:7], "SELECT ")
+            self.assertNotIn(";", sql)
+            self.assertFalse(re.search(
+                r"\b(?:INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|REPLACE|VACUUM|ATTACH|DETACH)\b",
+                sql, re.I
+            ))
+
+
+if __name__ == "__main__":
+    unittest.main()
