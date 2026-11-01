@@ -342,6 +342,33 @@ async function main(){
  assert.equal(query("SELECT COUNT(*) AS n FROM audit_logs WHERE operation_id="+q(racingOp))[0].n,1,
   "conflicting terminal replay inserted extra audit");
 
+ // Concurrent CONFLICTING reports (not just a later replay) must select one
+ // durable winner. The losing report must never write another terminal audit.
+ const conflictOp="f0000000-0000-4000-8000-000000000001";
+ const conflictAt=Math.floor(Date.now()/1000);
+ d1(["--command",insert("operations",[
+  "id","node_id","action","operator_id","idempotency_key","expected_revision",
+  "command_json","signature","status","created_at","expires_at"
+ ],[conflictOp,id.node,"node.preflight",id.actor,"ci-conflict-"+conflictOp,
+  rev,JSON.stringify({v:1,id:conflictOp,node_id:id.node,action:"node.preflight",
+   actor:id.actor,issued_at:conflictAt-3,expires_at:conflictAt+45,
+   expected_revision:rev,payload:{login_user:"root"}}),
+  "ci-signed-command","DISPATCHED",conflictAt-3,conflictAt+45])]);
+ const conflictingReports=await Promise.all([
+  send("/agent/v1/report",{
+   operation_id:conflictOp,status:"SUCCEEDED",result_code:"READ_ONLY_DIAGNOSTIC",
+   detail:{source:"first"}
+  },device),
+  send("/agent/v1/report",{
+   operation_id:conflictOp,status:"SUCCEEDED",result_code:"READ_ONLY_DIAGNOSTIC",
+   detail:{source:"second"}
+  },device)
+ ]);
+ assert.deepEqual(conflictingReports.map(r=>r.status).sort((a,b)=>a-b),[200,409],
+  "different concurrent terminal results must have one winner and one conflict");
+ assert.equal(query("SELECT COUNT(*) AS n FROM audit_logs WHERE operation_id="+q(conflictOp))[0].n,
+  1,"conflicting terminal reports generated duplicate audit");
+
  // P4/P5: exercise the ACTUAL local Gateway and D1 with a per-node Root
  // operation receipt (the Agent only transports it, never signs it).
  const special={
