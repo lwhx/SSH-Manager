@@ -32,7 +32,10 @@ type rootRecovery struct{
 func requiresManualReviewResult(code string)bool{
  return strings.HasSuffix(code,"_MANUAL_REVIEW")||
   strings.HasPrefix(code,"ROOT_MANUAL_")||
-  code=="RESCUE_KEY_OUTCOME_INVALID"
+  code=="RESCUE_KEY_OUTCOME_INVALID"||
+  // Existing Staging helpers may still emit these pre-fix codes after a
+  // partial authorized_keys write. They cannot prove no SSH side effect.
+  code=="KEY_INSTALL_FAILED"||code=="KEY_INSTALL_NOT_VERIFIED"
 }
 func rootRecoveryAction(action string)bool{
  switch action{
