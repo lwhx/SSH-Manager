@@ -91,6 +91,17 @@ test("existing Staging D1 requires a read-only single-flight check before migrat
  assert(check>=0&&migrate>check,"Staging migration must be preceded by read-only D1 operation preflight");
 });
 
+test("all read-only recovery gates target the actual Staging D1 database",()=>{
+ const config="/repo/wrangler.single.staging.native.jsonc";
+ const queries=[EMPTY_STAGING_SQL,DELETED_WORKER_RECOVERY_SQL,UNRESOLVED_OPERATION_PREFLIGHT_SQL];
+ for(const sql of queries){
+  assert.deepEqual(buildUnresolvedOperationPreflightArgs("ssh-manager-staging",config,sql),[
+   "d1","execute","ssh-manager-staging","--remote","--json",
+   "--config",config,"--command",sql
+  ]);
+ }
+});
+
 test("Staging D1 preflight executes against the configured database name, not the binding label",()=>{
  const config="/repo/wrangler.single.staging.native.jsonc";
  assert.deepEqual(buildUnresolvedOperationPreflightArgs("ssh-manager-staging",config),[
