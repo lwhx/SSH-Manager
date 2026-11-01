@@ -74,6 +74,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         self.assertTrue(report["preflight_ready"])
         self.assertFalse(report["real_ssh_authentication_verified"])
         self.assertFalse(report["remote_deployment_performed"])
+        self.assertFalse(report["network_calls"])
         self.assertEqual(report["fail_count"], 0)
         self.assertEqual(report["warn_count"], 0)
         self.assertEqual(len(report["checks"]), len(preflight.CHECKS) + 1)
@@ -138,7 +139,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(self.statuses(report)["terminal_duplicate_audit"]["count"], 1)
 
-    def test_expired_created_and_pending_are_warnings_not_approval(self):
+    def test_live_created_operation_and_pending_challenge_are_warnings_not_approval(self):
         self.seed_daily()
         self.db.execute(
             "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,"
@@ -159,6 +160,9 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(report["fail_count"], 0)
         self.assertEqual(report["warn_count"], 2)
+        lookup = self.statuses(report)
+        self.assertEqual(lookup["pending_challenge_present"]["count"], 1)
+        self.assertEqual(lookup["queued_operation_present"]["count"], 1)
         self.assertFalse(report["preflight_ready"])
 
     def test_verified_without_root_proof_or_audit_blocks(self):
