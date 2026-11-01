@@ -46,6 +46,17 @@
 - [ ] 不能出现自动关闭密码登录、自动救援公钥安装、自动回滚或批量变更。
 - [ ] 以上故障注入只用可销毁测试 VPS 或本地 D1/workerd；绝不能在生产 VPS 上模拟未知结果。
 
+## 4.1 SSH 验证挑战的事务与并发验收
+
+- [ ] **开始挑战**：在 Staging 对单个已完成公钥安装、已固定 Root 公钥并在线的测试节点发起挑战；确认 `ssh_verifications` PENDING、`operations` CREATED/DISPATCHED 与 `ssh.verification.start` 审计同一 D1 事务提交。响应中的原始 nonce 不得保存至数据库、日志或持久化浏览器存储。
+- [ ] **审计中断**：仅用隔离 SQLite/local D1 触发器注入审计 INSERT 失败；验证挑战、准备操作与审计**全部回滚**，不可留下孤立 PENDING。不得在实际 Staging D1 上添加用于故障注入的触发器。
+- [ ] **并发创建**：两个管理员同时开始同节点挑战时，只允许一个 PENDING；第二个必须拒绝且不派发另一份签名命令。如果已存在未结束的 DISPATCHED/RUNNING，仍应返回明确的操作阻塞信息，不得释放单节点操作锁。
+- [ ] **配置变化**：在开始请求的预读与事务写入之间模拟节点 SSH 配置版本、活动 daily key、Agent 心跳状态发生变化；应拒绝创建新挑战及准备操作。不得使用过期公钥验证结果继续推进密码关闭流程。
+- [ ] **挑战取消**：只允许当前节点、当前管理员角色授权且尚未到期的 PENDING 进入 CANCELLED；与 Root VERIFIED 并发时必须通过数据库条件更新解决竞争，后到请求返回 HTTP 409 而不是伪报“已取消”。
+- [ ] **取消审计故障**：本地注入 `ssh.verification.cancel` 审计写入失败；必须回滚 CANCELLED，重试同一取消应遵守真实状态。跨节点或重复取消均不得产生虚假成功记录。
+- [ ] **GET 只读**：重复读取过期、活动日常公钥已变化或配置版本不匹配的挑战，数据库原始记录与审计行数不变；响应只投影 EXPIRED/INVALIDATED。过期 PENDING 只能在受控写入路径安全清理。
+- [ ] **取消不等于终止 Agent 执行**：取消挑战后，已经 DISPATCHED/RUNNING 且回执未知的准备任务仍保持操作锁，不能将取消当作 Root 未执行命令的证据，也不得自动重派或回滚。
+
 ## 5. 上线证据与拒绝条件
 
 每个用例记录测试日期、Git SHA、Staging 版本、测试节点 UUID、操作/挑战 ID、预期/实际结果及脱敏截图。禁止收集私钥、pairing token、challenge token、Cloudflare API token、Access Cookie 或完整敏感 SSH 配置。
