@@ -2,6 +2,7 @@ import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
+import {rotatePairingToken} from "./pairingTokenStore";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
@@ -112,11 +113,11 @@ async function findNode(env:Env,id:string){
 function isOnline(node:any){return node.status==="online"&&Number(node.last_seen_at)>now()-90;}
 async function freshPairToken(env:Env,user:Actor,nodeId:string){
   const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
-  const hash=await sha256hex(token);
-  await env.DB.prepare("DELETE FROM pairing_tokens WHERE node_id=? AND used_at IS NULL").bind(nodeId).run();
-  await env.DB.prepare("INSERT INTO pairing_tokens(id,node_id,token_hash,expires_at,created_by) VALUES (?,?,?,?,?)")
-    .bind(crypto.randomUUID(),nodeId,hash,now()+600,user.id).run();
-  await audit(env,user,nodeId,"node.pairing_token","created");
+  const hash=await sha256hex(token),t=now();
+  await rotatePairingToken(env.DB,{
+    nodeId,tokenId:crypto.randomUUID(),tokenHash:hash,expiresAt:t+600,
+    createdBy:user.id,auditId:crypto.randomUUID(),createdAt:t
+  });
   return {token,expires_in:600};
 }
 
