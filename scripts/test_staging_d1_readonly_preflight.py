@@ -209,6 +209,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
                 report, code = self.assess()
                 self.assertEqual(code, 2)
                 self.assertEqual(report["checks"][0]["id"], "required_schema")
+                self.db.close()
                 self.setUp()
 
     def test_schema_rejects_wrong_or_nonunique_partial_index_definitions(self):
