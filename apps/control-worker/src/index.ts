@@ -3,7 +3,7 @@ import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
-import {findIdempotentOperation} from "./operationIdempotency";
+import {findIdempotentOperation,recoverIdempotentInsertConflict} from "./operationIdempotency";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
@@ -136,6 +136,7 @@ async function queueNodeOperation(
   const id=crypto.randomUUID(),t=now();
   const cmd={v:1 as const,id,node_id:node.id,action,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload};
   const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
+  try{
   await withNodeOperationConflictGuard(()=>env.DB.batch([
     env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
       .bind(id,node.id,action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45),
@@ -144,6 +145,11 @@ async function queueNodeOperation(
         typeof payload.reason==="string"?payload.reason.slice(0,280):null,t)
   ]),
     ()=>env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,now()).first<{status:string;expires_at:number}>(),now());
+  }catch(error){
+    const replay=await recoverIdempotentInsertConflict(error,()=>
+      findIdempotentOperation(env.DB,a.id,idem,{nodeId:node.id,action,payload},now()));
+    return response(replay);
+  }
   await dispatchPreparedOperation(env,node.id,id,signed);
   return response({operation_id:id,status:"QUEUED"},202);
 }

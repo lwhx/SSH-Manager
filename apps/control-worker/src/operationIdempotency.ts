@@ -49,3 +49,41 @@ export async function findIdempotentOperation(
  }
  return {operation_id:old.id,status:projectOperationStatus(old,at)};
 }
+
+
+function possibleIdempotentInsertCollision(error:unknown):boolean {
+ if(error instanceof ApiError&&(
+  error.code==="NODE_OPERATION_IN_PROGRESS"||
+  error.code==="NODE_OPERATION_RESULT_UNKNOWN"))return true;
+ const marker=/UNIQUE constraint failed:\s*operations\.operator_id,\s*operations\.idempotency_key\b/i;
+ let item:unknown=error;
+ for(let depth=0;depth<5;depth++){
+  if(typeof item==="string")return marker.test(item);
+  if(!(item instanceof Error))return false;
+  if(marker.test(item.message))return true;
+  item=item.cause;
+ }
+ return false;
+}
+
+/**
+ * Under concurrent requests the database may create the original operation
+ * between the idempotency SELECT and INSERT. The loser may only reuse that
+ * exact command; never retry the INSERT or send another Agent message.
+ */
+export async function recoverIdempotentInsertConflict(
+ error:unknown,
+ lookup:()=>Promise<{operation_id:string;status:string}|null>
+):Promise<{operation_id:string;status:string}>{
+ if(!possibleIdempotentInsertCollision(error))throw error;
+ try{
+  const prior=await lookup();
+  if(prior)return prior;
+ }catch(lookupError){
+  // A collision with a different VPS/action/payload is a deliberate 409.
+  if(lookupError instanceof ApiError&&lookupError.code==="IDEMPOTENCY_SCOPE_CONFLICT")
+   throw lookupError;
+  // A failed lookup cannot justify claiming the operation was queued.
+ }
+ throw error;
+}
