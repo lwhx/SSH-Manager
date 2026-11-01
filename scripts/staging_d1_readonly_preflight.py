@@ -26,7 +26,7 @@ import sys
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_NAME = "wrangler.single.staging.local.jsonc"
+CONFIG_NAMES = ("wrangler.single.staging.local.jsonc", "wrangler.single.staging.native.jsonc")
 DATABASE_NAME = "ssh-manager-staging"
 DB_UUID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.I)
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$", re.I)
@@ -298,9 +298,8 @@ def verify_reviewed_checkout(expected_sha: str, runner: Callable[..., Any] = sub
 
 
 def staging_config(config: Path, confirmed_id: str) -> Path:
-    expected_config = ROOT / CONFIG_NAME
-    if (config.name != CONFIG_NAME or config.is_symlink() or not config.is_file()
-        or config.resolve() != expected_config.resolve()):
+    if (config.name not in CONFIG_NAMES or config.is_symlink() or not config.is_file()
+        or config.resolve() != (ROOT / config.name).resolve()):
         raise ValueError("Only the existing repository-root single Staging config is allowed")
     if not DB_UUID.fullmatch(confirmed_id):
         raise ValueError("Invalid confirmed Staging D1 UUID")
