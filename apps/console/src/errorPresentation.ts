@@ -3,6 +3,8 @@
  * Keep the stable server error code in the message for audit correlation.
  */
 const messages:Record<string,string>={
+ IDEMPOTENCY_SCOPE_CONFLICT:
+  "同一幂等键不能用于不同 VPS、不同 SSH 操作或不同参数。请核对原任务及节点记录，不要重复下发（IDEMPOTENCY_SCOPE_CONFLICT）。",
  NODE_OPERATION_RESULT_UNKNOWN:
   "当前 VPS 上一次 SSH 操作结果未知，已禁止再次下发。请先通过 VPS 服务商控制台核查实际 SSH 状态，不要重复执行危险命令（NODE_OPERATION_RESULT_UNKNOWN）。",
  NODE_OPERATION_IN_PROGRESS:
