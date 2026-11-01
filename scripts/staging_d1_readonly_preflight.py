@@ -85,15 +85,14 @@ CHECKS = (
           "(SELECT 1 FROM audit_logs a WHERE a.node_id=p.node_id "
           "AND a.actor_id=p.approved_by AND a.action='ssh.proof-key.pin' "
           "AND a.result='ok')"),
-    Check("shared_root_proof_key", "FAIL", "Root proof public key reused across multiple VPS nodes",
-          "FROM (SELECT public_key FROM node_ssh_proof_keys "
-          "GROUP BY public_key HAVING COUNT(*)>1)"),
+    Check("shared_root_proof_key", "FAIL", "Root proof key fingerprint reused across multiple VPS nodes",
+          "FROM (SELECT fingerprint FROM node_ssh_proof_keys "
+          "GROUP BY fingerprint HAVING COUNT(*)>1)"),
     Check("overlapping_operations", "FAIL", "VPS with more than one unresolved Agent operation",
           "FROM (SELECT node_id FROM operations WHERE status IN "
           "('CREATED','DISPATCHED','RUNNING') GROUP BY node_id HAVING COUNT(*)>1)"),
-    Check("unknown_terminal_result", "FAIL", "Expired DISPATCHED/RUNNING operation requiring manual investigation",
-          "FROM operations WHERE status IN ('DISPATCHED','RUNNING') "
-          "AND expires_at<=unixepoch('now')"),
+    Check("unknown_terminal_result", "FAIL", "Any DISPATCHED/RUNNING operation is unresolved; expiry never releases the VPS lock",
+          "FROM operations WHERE status IN ('DISPATCHED','RUNNING')"),
     Check("terminal_missing_audit", "FAIL", "Terminal Agent result lacks matching durable audit",
           "FROM operations o WHERE o.status IN ('SUCCEEDED','FAILED') AND NOT EXISTS "
           "(SELECT 1 FROM audit_logs a WHERE a.operation_id=o.id "
@@ -130,16 +129,16 @@ CHECKS = (
           "GROUP BY purpose,version HAVING COUNT(*)>1)"),
     Check("unexpected_assertion_row", "FAIL", "Transaction-only SQLite assertion table is nonempty",
           "FROM manual_ssh_assertions"),
-    Check("active_credential_missing_pair_audit", "FAIL", "Active Agent credential lacks pairing audit",
+    Check("active_credential_missing_pair_audit", "FAIL", "Active Agent credential lacks matching one-time pairing attribution",
           "FROM agent_credentials c WHERE c.revoked_at IS NULL AND NOT EXISTS "
-          "(SELECT 1 FROM audit_logs a WHERE a.node_id=c.node_id "
-          "AND a.action='agent.pair')"),
-    Check("expired_pending_challenge", "WARN", "Expired PENDING challenge needs inspected cleanup",
-          "FROM ssh_verifications WHERE status='PENDING' "
-          "AND expires_at<=unixepoch('now')"),
-    Check("expired_undispatched_operation", "WARN", "Expired CREATED operation awaits safe expiry handling",
-          "FROM operations WHERE status='CREATED' "
-          "AND expires_at<=unixepoch('now')"),
+          "(SELECT 1 FROM pairing_tokens p JOIN audit_logs a "
+          "ON a.node_id=p.node_id AND a.actor_id=p.created_by "
+          "AND a.action='agent.pair' AND a.result='success' "
+          "WHERE p.node_id=c.node_id AND p.used_at=c.paired_at)"),
+    Check("expired_pending_challenge", "WARN", "Any PENDING challenge needs completion or manual review before release",
+          "FROM ssh_verifications WHERE status='PENDING'"),
+    Check("expired_undispatched_operation", "WARN", "Any CREATED operation remains queued and needs explicit review",
+          "FROM operations WHERE status='CREATED'"),
 )
 CHECKS_SQL = " UNION ALL ".join(
     "SELECT '" + c.key + "' AS check_id, COUNT(*) AS n " + c.source
@@ -176,6 +175,7 @@ def evaluate(query: Callable[[str], list[dict[str, Any]]],
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_mode": source_mode,
         "read_only": True,
+        "network_calls": source_mode == "staging_remote_d1",
         "remote_deployment_performed": False,
         "ssh_configuration_modified": False,
         "reviewed_commit": reviewed_commit,
@@ -237,12 +237,12 @@ def local_query(connection: sqlite3.Connection, sql: str) -> list[dict[str, Any]
     return [dict(row) for row in connection.execute(sql).fetchall()]
 
 def verify_reviewed_checkout(expected_sha: str, runner: Callable[..., Any] = subprocess.run) -> None:
-    """Refuse remote evidence from the wrong checkout or an edited preflight."""
+    """Refuse remote evidence from the wrong checkout or any dirty worktree."""
     if not COMMIT_SHA.fullmatch(expected_sha):
         raise ValueError("Review commit must be a full 40-character Git SHA")
     commands = (
         (["git", "rev-parse", "HEAD"], "sha"),
-        (["git", "status", "--porcelain", "--", "scripts/staging_d1_readonly_preflight.py"], "dirty"),
+        (["git", "status", "--porcelain", "--untracked-files=normal"], "dirty"),
     )
     for argv, kind in commands:
         try:
@@ -255,12 +255,14 @@ def verify_reviewed_checkout(expected_sha: str, runner: Callable[..., Any] = sub
         if kind == "sha" and result.stdout.strip().lower() != expected_sha.lower():
             raise ValueError("Local HEAD differs from the approved Git commit")
         if kind == "dirty" and result.stdout.strip():
-            raise ValueError("Local D1 preflight script differs from the reviewed Git commit")
+            raise ValueError("Git worktree is not clean; refusing remote D1 evidence")
 
 
 def staging_config(config: Path, confirmed_id: str) -> Path:
-    if config.name != CONFIG_NAME or config.is_symlink() or not config.is_file():
-        raise ValueError("Only the existing non-symlink single Staging config is allowed")
+    expected_config = ROOT / CONFIG_NAME
+    if (config.name != CONFIG_NAME or config.is_symlink() or not config.is_file()
+        or config.resolve() != expected_config.resolve()):
+        raise ValueError("Only the existing repository-root single Staging config is allowed")
     if not DB_UUID.fullmatch(confirmed_id):
         raise ValueError("Invalid confirmed Staging D1 UUID")
     if stat.S_IMODE(config.stat().st_mode) & 0o022 and os.name != "nt":
@@ -287,10 +289,26 @@ def staging_config(config: Path, confirmed_id: str) -> Path:
         or not DB_UUID.fullmatch(binding["database_id"])
         or binding["database_id"].lower() != confirmed_id.lower()):
         raise ValueError("Confirmed Staging database UUID does not match config")
-    for host in ("CONTROL_HOSTNAME", "AGENT_HOSTNAME"):
-        name = vars_.get(host)
-        if not isinstance(name, str) or "staging" not in name.lower():
-            raise ValueError("Cloudflare Staging hostnames not confirmed")
+    control_host = vars_.get("CONTROL_HOSTNAME")
+    agent_host = vars_.get("AGENT_HOSTNAME")
+    hostname = re.compile(
+        r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    )
+    if (not isinstance(control_host, str) or not isinstance(agent_host, str)
+        or control_host == agent_host
+        or not hostname.fullmatch(control_host) or not hostname.fullmatch(agent_host)
+        or "staging" not in control_host.split(".")[0]
+        or "staging" not in agent_host.split(".")[0]):
+        raise ValueError("Distinct, valid Control/Agent Staging hostnames not confirmed")
+    routes = data.get("routes")
+    if (not isinstance(routes, list) or len(routes) != 2
+        or any(not isinstance(route, dict) or route.get("custom_domain") is not True
+               for route in routes)
+        or {route.get("pattern") for route in routes} != {control_host, agent_host}):
+        raise ValueError("Staging Worker routes do not match the confirmed hostnames")
+    assets = data.get("assets")
+    if not isinstance(assets, dict) or assets.get("run_worker_first") is not True:
+        raise ValueError("Single Worker asset routing configuration is not confirmed")
     return config.resolve()
 
 def parse_wrangler_json(raw: str) -> list[dict[str, Any]]:
