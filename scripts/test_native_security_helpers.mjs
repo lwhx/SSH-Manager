@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
  DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery,
- UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight} from "./native_security_helpers.mjs";
+ UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight,
+ buildUnresolvedOperationPreflightArgs} from "./native_security_helpers.mjs";
 const columns=["nodes","operations","paired_agents","pairing_tokens","device_nonces","node_keys","verifications","snapshots"];
 const empty=()=>[{success:true,results:[Object.fromEntries(columns.map(k=>[k,0]))]}];
 test("empty D1 identity tables permit one-time signer recovery only with complete verification",()=>{
@@ -88,4 +89,12 @@ test("existing Staging D1 requires a read-only single-flight check before migrat
  const check=updateRoutine.indexOf("assertNoDuplicateUnresolvedOperations();");
  const migrate=updateRoutine.indexOf("migrate();");
  assert(check>=0&&migrate>check,"Staging migration must be preceded by read-only D1 operation preflight");
+});
+
+test("Staging D1 preflight executes against the configured database name, not the binding label",()=>{
+ const config="/repo/wrangler.single.staging.native.jsonc";
+ assert.deepEqual(buildUnresolvedOperationPreflightArgs("ssh-manager-staging",config),[
+  "d1","execute","ssh-manager-staging","--remote","--json",
+  "--config",config,"--command",UNRESOLVED_OPERATION_PREFLIGHT_SQL
+ ]);
 });
