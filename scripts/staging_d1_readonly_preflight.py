@@ -33,8 +33,8 @@ COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$", re.I)
 MAX_JSON_BYTES = 65536
 
 REQUIRED_TABLES = (
-    "users", "user_identities", "identity_link_tokens", "nodes",
-    "agent_credentials", "public_keys", "node_keys", "ssh_verifications",
+    "users", "user_identities", "identity_link_tokens", "pairing_tokens",
+    "device_nonces", "nodes", "agent_credentials", "public_keys", "node_keys", "ssh_verifications",
     "node_ssh_proof_keys", "operations", "audit_logs",
     "ssh_config_snapshots", "manual_ssh_assertions",
 )
