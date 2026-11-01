@@ -1,3 +1,4 @@
+import {rotateGlobalPublicKey} from "./globalKeyRotation";
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate,persistNodeSettingsUpdate} from "./nodeMetadata";
 import {requirePinnedRootForDailyInstall} from "./dailyKeyProofPolicy";
@@ -484,23 +485,12 @@ async function handle(req:Request,env:Env):Promise<Response>{
     needRole(a,"owner");const b=await bodyJSON(req);
     ensure(typeof b.public_key==="string" && b.public_key.length<2048,"KEY_INVALID");
     const key=await parsePublicKey(b.public_key);
-    const purpose=keyMatch[1],version=Number((await env.DB.prepare("SELECT max(version) AS v FROM public_keys WHERE purpose=?").bind(purpose).first<{v:number|null}>())?.v||0)+1;
+    const purpose=keyMatch[1] as "daily"|"rescue";
     const id=crypto.randomUUID(),name=String(b.name||purpose).slice(0,80);
-    // A D1 batch is transactional; changing global settings NEVER installs keys.
-    const changes=[
-      env.DB.prepare("UPDATE public_keys SET active=0 WHERE purpose=?").bind(purpose),
-      env.DB.prepare("INSERT INTO public_keys(id,purpose,name,algorithm,public_key,fingerprint,version,active,created_by,created_at) VALUES (?,?,?,?,?,?,?,1,?,?)")
-        .bind(id,purpose,name,key.algorithm,key.normalized,key.fingerprint,version,a.id,now())
-    ];
-    // Rotating the global daily key revokes any previously issued verification
-    // challenge, without modifying keys on the actual VPS.
-    if(purpose==="daily"){
-      changes.push(env.DB.prepare(
-        "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE status='PENDING'"
-      ).bind(now()));
-    }
-    await env.DB.batch(changes);
-    await audit(env,a,null,"keys."+purpose+".update","ok");
+    const version=await rotateGlobalPublicKey(env.DB,{
+      id,purpose,name,algorithm:key.algorithm,publicKey:key.normalized,
+      fingerprint:key.fingerprint,actorId:a.id,auditId:crypto.randomUUID(),createdAt:now()
+    });
     return response({id,purpose,fingerprint:key.fingerprint,version,installed_nodes:0});
   }
   if(p==="/api/v1/operations"&&req.method==="GET"){
