@@ -1,5 +1,6 @@
 import {DurableObject} from "cloudflare:workers";
-import {isManualAction,verifyRootManualOutcome} from "../../../packages/protocol/src/manual";
+import {isManualAction,verifyRootManualOutcome,verifyRootManualNoWriteFailure,
+ verifyRootDailyInstallOutcome,verifyRootDailyNoWriteFailure} from "../../../packages/protocol/src/manual";
 import {proofChallengeReadiness,verifyPinnedSSHProof,verifyPinnedSSHSignature} from "../../../packages/protocol/src/proof";
 import {ApiError,errorResponse,response,now,sha256hex,decodeBase64url,validNodeId} from "../../../packages/protocol/src/index";
 interface Env {DB:D1Database;NODE_SESSIONS:DurableObjectNamespace;COMMAND_PUBLIC_KEY:string;}
@@ -51,15 +52,26 @@ async function pair(req:Request,env:Env):Promise<Response>{
       "INSERT OR IGNORE INTO agent_credentials(node_id,public_key,paired_at) SELECT ?,?,? WHERE EXISTS "+
       "(SELECT 1 FROM pairing_tokens WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)"
     ).bind(id,key,t,id,digest,t),
+    // Attribute the pairing audit to the Owner/Admin who issued this token.
+    // The row is inserted only if the preceding credential INSERT succeeded,
+    // and while the same one-time token is still unused. A failed audit aborts
+    // the entire D1 batch, rolling back credential creation and token use.
+    env.DB.prepare(
+      "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
+      "SELECT ?,created_by,?,'agent.pair',NULL,'success',NULL,? FROM pairing_tokens "+
+      "WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>? "+
+      "AND EXISTS (SELECT 1 FROM agent_credentials WHERE node_id=? AND public_key=? AND paired_at=?)"
+    ).bind(crypto.randomUUID(),id,t,id,digest,t,id,key,t),
     env.DB.prepare("UPDATE pairing_tokens SET used_at=? WHERE node_id=? AND token_hash=? AND used_at IS NULL AND expires_at>?")
       .bind(t,id,digest,t),
     env.DB.prepare("UPDATE nodes SET status='online',init_stage='PREFLIGHT',last_seen_at=? WHERE id=? AND EXISTS "+
       "(SELECT 1 FROM agent_credentials WHERE node_id=? AND public_key=?)").bind(t,id,id,key)
   ];
-  // D1 batch is transactional: pairing token consumption and device binding
+  // D1 batch is transactional: credential binding, audit, and token consumption
   // cannot be partially committed on DB failures.
-  const [added,consumed]=await env.DB.batch(statements);
-  must(added.meta.changes===1&&consumed.meta.changes===1,"INVALID_OR_EXPIRED_PAIRING",403);
+  const [added,audited,consumed,updated]=await env.DB.batch(statements);
+  must(added.meta.changes===1&&audited.meta.changes===1&&consumed.meta.changes===1&&updated.meta.changes===1,
+    "INVALID_OR_EXPIRED_PAIRING",403);
   return response({node_id:id,command_signing_public_key:env.COMMAND_PUBLIC_KEY},201);
 }
 async function authenticated(req:Request,env:Env):Promise<Response>{
@@ -240,15 +252,33 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
         current.key_fingerprint===c.payload.fingerprint&&
         current.public_key_id===c.payload.key_id,"VERIFICATION_PREPARATION_STALE",409);
     }
-    // Validate helper proof BEFORE setting a sensitive operation to SUCCEEDED.
-    if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
-      const c=JSON.parse(op.command_json);
-      must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
-        "INSTALL_PROOF_MISSING",409);
+    // Require independent Root proof before either terminal manual SSH report.
+    if((status==="SUCCEEDED"||status==="FAILED")&&op.action==="ssh.daily.install"){
+      let c:any;
+      try{c=JSON.parse(op.command_json);}catch{throw new ApiError("DAILY_COMMAND_SCOPE_INVALID",409);}
+      must(c.id===opId&&c.node_id===id&&c.action===op.action&&
+        /^[a-f0-9]{64}$/.test(String(c.expected_revision||""))&&plain(c.payload),
+        "DAILY_COMMAND_SCOPE_INVALID",409);
+      const pinned=await env.DB.prepare(
+        "SELECT public_key FROM node_ssh_proof_keys WHERE node_id=?"
+      ).bind(id).first<{public_key:string}>();
+      must(pinned,"ROOT_DAILY_RECEIPT_KEY_NOT_PINNED",403);
+      const expected={
+        nodeId:id,operationId:opId,action:"ssh.daily.install" as const,
+        resultCode:reportedCode,expectedRevision:c.expected_revision,
+        issuedAt:c.issued_at,expiresAt:c.expires_at
+      };
+      try{
+        if(status==="SUCCEEDED"){
+          await verifyRootDailyInstallOutcome(b.detail,pinned.public_key,expected,c.payload);
+        }else{
+          await verifyRootDailyNoWriteFailure(b.detail,pinned.public_key,expected);
+        }
+      }catch{throw new ApiError("ROOT_DAILY_RECEIPT_INVALID",403);}
     }
     let manualResult:Record<string,unknown>|null=null;
     let signedManualCommand:any=null;
-    if(status==="SUCCEEDED"&&isManualAction(op.action)){
+    if((status==="SUCCEEDED"||status==="FAILED")&&isManualAction(op.action)){
       signedManualCommand=JSON.parse(op.command_json);
       must(signedManualCommand.id===opId&&signedManualCommand.node_id===id&&
         signedManualCommand.action===op.action&&
@@ -260,17 +290,25 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       ).bind(id).first<{public_key:string}>();
       must(pinned,"ROOT_MANUAL_RECEIPT_KEY_NOT_PINNED",403);
       try{
-        manualResult=await verifyRootManualOutcome(b.detail,pinned.public_key,{
+        const expected={
           nodeId:id,operationId:opId,action:op.action,resultCode:reportedCode,
           expectedRevision:signedManualCommand.expected_revision,
           issuedAt:signedManualCommand.issued_at,expiresAt:signedManualCommand.expires_at
-        },signedManualCommand.payload);
+        };
+        if(status==="SUCCEEDED"){
+          manualResult=await verifyRootManualOutcome(b.detail,pinned.public_key,
+            expected,signedManualCommand.payload);
+        }else{
+          await verifyRootManualNoWriteFailure(b.detail,pinned.public_key,expected);
+        }
       }catch{throw new ApiError("ROOT_MANUAL_RECEIPT_INVALID",403);}
-      const node=await env.DB.prepare(
-        "SELECT config_revision,init_stage FROM nodes WHERE id=?"
-      ).bind(id).first<{config_revision:string;init_stage:string}>();
-      must(node&&node.config_revision===signedManualCommand.expected_revision,
-        "MANUAL_SSH_REVISION_CHANGED",409);
+      if(status==="SUCCEEDED"){
+        const node=await env.DB.prepare(
+          "SELECT config_revision,init_stage FROM nodes WHERE id=?"
+        ).bind(id).first<{config_revision:string;init_stage:string}>();
+        must(node&&node.config_revision===signedManualCommand.expected_revision,
+          "MANUAL_SSH_REVISION_CHANGED",409);
+      }
     }
     const t=now();
     if(status==="RUNNING"){
@@ -286,6 +324,16 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     // node keys/stage or audit were updated, leaving irrecoverable split state
     // after an HTTP timeout, an FK failure, or a Worker exception.
     const steps:D1PreparedStatement[]=[];
+    const requiredEffectIndices:number[]=[];
+    // A zero-row UPDATE is not a SQLite error. CHECK-failure sentinels
+    // abort this D1 transaction on a stale CAS or incomplete side effect.
+    const requireChanged=(statement:D1PreparedStatement)=>{
+      requiredEffectIndices.push(steps.length);
+      steps.push(statement);
+      steps.push(env.DB.prepare(
+        "INSERT INTO manual_ssh_assertions(value) SELECT 0 WHERE changes()!=1"
+      ));
+    };
     let guard="";
     let guardArgs:unknown[]=[];
     if(status==="SUCCEEDED"&&op.action==="ssh.verification.prepare"){
@@ -298,7 +346,7 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       guard+=" AND EXISTS (SELECT 1 FROM nodes WHERE id=?)";
       guardArgs.push(id);
     }
-    steps.push(env.DB.prepare(
+    requireChanged(env.DB.prepare(
       "UPDATE operations SET status=?,result_code=?,detail=?,finished_at=? "+
       "WHERE id=? AND node_id=? AND status IN ('DISPATCHED','RUNNING')"+guard
     ).bind(status,reportedCode,reportedDetail,t,opId,id,...guardArgs));
@@ -306,15 +354,13 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     // same transaction. No separate D1 call can mark the operation SUCCEEDED.
     const committed=" EXISTS (SELECT 1 FROM operations WHERE id=? AND node_id=? "+
       "AND status=? AND result_code=?)";
-    let requiredSideEffects=0;
     if(op.action==="ssh.verification.prepare"){
       const cmd=JSON.parse(op.command_json);
       if(status==="SUCCEEDED"){
-        steps.push(env.DB.prepare(
+        requireChanged(env.DB.prepare(
           "UPDATE ssh_verifications SET prepared_at=? WHERE id=? AND node_id=? "+
           "AND status='PENDING' AND expires_at>? AND"+committed
         ).bind(t,cmd.payload.verification_id,id,t,opId,id,status,reportedCode));
-        requiredSideEffects=1;
       }else{
         steps.push(env.DB.prepare(
           "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
@@ -333,11 +379,10 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       const preserve=previous.config_revision===revision&&
         (previous.init_stage==="WAITING_VERIFICATION"||previous.init_stage==="KEY_VERIFIED"||
          previous.init_stage==="PASSWORD_DISABLED");
-      steps.push(env.DB.prepare(
+      requireChanged(env.DB.prepare(
         "UPDATE nodes SET config_revision=?,init_stage=? WHERE id=? AND"+committed
       ).bind(revision,preserve?previous.init_stage:"POLICY_INSPECTED",id,
         opId,id,status,reportedCode));
-      requiredSideEffects=1;
       if(previous.config_revision!==revision){
         steps.push(env.DB.prepare(
           "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
@@ -347,19 +392,18 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     }
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
       const cmd=JSON.parse(op.command_json);
-      steps.push(env.DB.prepare(
+      requireChanged(env.DB.prepare(
         "INSERT INTO node_keys(id,node_id,public_key_id,login_user,purpose,state) "+
         "SELECT ?,?,?,?,'daily','installed' WHERE"+committed
       ).bind(crypto.randomUUID(),id,cmd.payload.key_id,cmd.payload.login_user,
         opId,id,status,reportedCode));
-      steps.push(env.DB.prepare(
+      requireChanged(env.DB.prepare(
         "UPDATE nodes SET init_stage='WAITING_VERIFICATION' WHERE id=? AND"+committed
       ).bind(id,opId,id,status,reportedCode));
       steps.push(env.DB.prepare(
         "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? "+
         "WHERE node_id=? AND status='PENDING' AND"+committed
       ).bind(t,id,opId,id,status,reportedCode));
-      requiredSideEffects=2;
     }
     if(status==="SUCCEEDED"&&isManualAction(op.action)&&manualResult&&signedManualCommand){
       const c=signedManualCommand;
@@ -444,21 +488,42 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
         );
       }
     }
-    steps.push(env.DB.prepare(
+    requireChanged(env.DB.prepare(
       "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
       "SELECT ?,?,?,?,?,?,?,? WHERE"+committed
     ).bind(crypto.randomUUID(),op.operator_id,id,op.action,opId,status,
       reportedCode,t,opId,id,status,reportedCode));
-    // D1 batch executes transactionally; statement errors roll back ALL
-    // records. SQL predicates prevent later steps applying on failed claims.
-    const outcome=await env.DB.batch(steps);
-    must(outcome[0].meta.changes===1,"INVALID_STATUS_TRANSITION",409);
-    for(let index=1;index<=requiredSideEffects;index++){
-      must(outcome[index].meta.changes===1,"TERMINAL_REPORT_EFFECT_MISSING",409);
+    // All mandatory updates and the audit are checked BEFORE commit.
+    try{
+      const outcome=await env.DB.batch(steps);
+      for(const index of requiredEffectIndices){
+        must(outcome[index]?.meta.changes===1,
+          "TERMINAL_REPORT_TRANSACTION_INCOMPLETE",409);
+      }
+      return response({accepted:true});
+    }catch(error){
+      // Two signed reports can both initially observe DISPATCHED. Only an
+      // exactly matching, ALREADY DURABLE terminal result is idempotent.
+      let latest:{status:string;result_code:string|null;detail:string|null}|null=null;
+      try{
+        latest=await env.DB.prepare(
+          "SELECT status,result_code,detail FROM operations WHERE id=? AND node_id=?"
+        ).bind(opId,id).first<{status:string;result_code:string|null;detail:string|null}>();
+      }catch{throw error;}
+      if(latest&&["SUCCEEDED","FAILED"].includes(latest.status)){
+        must(latest.status===status&&latest.result_code===reportedCode&&
+          latest.detail===reportedDetail,"CONFLICTING_OPERATION_REPORT",409);
+        if(op.action==="ssh.verification.prepare"&&status==="SUCCEEDED"){
+          const command=JSON.parse(op.command_json);
+          const prepared=await env.DB.prepare(
+            "SELECT prepared_at FROM ssh_verifications WHERE id=? AND node_id=?"
+          ).bind(command.payload.verification_id,id).first<{prepared_at:number|null}>();
+          must(prepared?.prepared_at!=null,"PREPARATION_SIDE_EFFECT_MISSING",409);
+        }
+        return response({accepted:true,idempotent:true});
+      }
+      throw error;
     }
-    must(outcome[outcome.length-1].meta.changes===1,
-      "TERMINAL_REPORT_AUDIT_MISSING",409);
-    return response({accepted:true});
   }
   if(p==="/agent/v1/ws"){
     must(req.headers.get("Upgrade")?.toLowerCase()==="websocket","WEBSOCKET_REQUIRED",426);

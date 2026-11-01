@@ -1,5 +1,16 @@
+import {rotateGlobalPublicKey} from "./globalKeyRotation";
+import {bootstrapFirstOwner,issueIdentityLinkToken,consumeIdentityLinkToken} from "./identityLinkStore";
 import {createRemoteJWKSet,jwtVerify} from "jose";
-import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
+import {parseNodeChanges,buildNodeSettingsUpdate,persistNodeSettingsUpdate} from "./nodeMetadata";
+import {requirePinnedRootForDailyInstall} from "./dailyKeyProofPolicy";
+import {persistRootProofPin} from "./rootProofPin";
+import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
+import {dispatchPreparedOperation} from "./operationDispatch";
+import {rotatePairingToken} from "./pairingTokenStore";
+import {createNodeWithPairingToken} from "./nodeCreation";
+import {persistVerificationStart,cancelPendingVerification,projectVerificationReadStatus} from "./verificationLifecycle";
+import {findIdempotentOperation,recoverIdempotentInsertConflict} from "./operationIdempotency";
+import {verificationBlocker,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
 interface Env {
@@ -11,7 +22,7 @@ interface Env {
 }
 interface Actor {id:string; email:string; role:string; subject:string;}
 const jsonLimit=8192;
-const allowedMethods=new Set(["GET","POST","PUT"]);
+const allowedMethods=new Set(["GET","POST","PUT","PATCH"]);
 function ensure(condition:unknown,code:string,status=400):asserts condition {if(!condition)throw new ApiError(code,status);}
 async function bodyJSON(req:Request):Promise<Record<string,unknown>> {
   const txt=await req.text();
@@ -49,12 +60,26 @@ async function actor(req:Request,env:Env):Promise<Actor>{
   if(!identity&&email===env.BOOTSTRAP_OWNER_EMAIL.toLowerCase()){
     const existing=await env.DB.prepare("SELECT id FROM users WHERE email=? LIMIT 1").bind(email).first();
     if(!existing){
-      const id=crypto.randomUUID();
-      await env.DB.batch([
-        env.DB.prepare("INSERT INTO users(id,email,role,status,created_at) VALUES (?,?,'owner','active',?)").bind(id,email,now()),
-        env.DB.prepare("INSERT INTO user_identities(subject,user_id,provider,created_at) VALUES (?,?,?,?)").bind(subject,id,"cloudflare-access",now())
-      ]);
-      identity={id,email,role:"owner",status:"active"};
+      const id=crypto.randomUUID(),t=now();
+      try {
+        await bootstrapFirstOwner(env.DB,{
+          userId:id,email,subject,createdAt:t,auditId:crypto.randomUUID()
+        });
+        identity={id,email,role:"owner",status:"active"};
+      }catch(error){
+        // A concurrent request with the SAME verified Access subject can
+        // reuse its committed identity. Different subjects may never be
+        // silently linked by email, even when both claim the Owner email.
+        identity=await env.DB.prepare(
+          "SELECT u.id,u.email,u.role,u.status FROM user_identities i "+
+          "JOIN users u ON i.user_id=u.id WHERE i.subject=?"
+        ).bind(subject).first<{id:string;email:string;role:string;status:string}>();
+        if(!identity){
+          const taken=await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(email).first();
+          if(taken)throw new ApiError("FORBIDDEN",403);
+          throw error;
+        }
+      }
     }
   }
   ensure(identity?.status==="active","FORBIDDEN",403);
@@ -72,18 +97,12 @@ async function claimIdentity(req:Request,env:Env):Promise<Response>{
   ensure(row&&row.status==="active"&&row.email.toLowerCase()===identity.email,"INVALID_LINK_TOKEN",403);
   const bound=await env.DB.prepare("SELECT user_id FROM user_identities WHERE subject=?").bind(identity.subject).first();
   ensure(!bound,"IDENTITY_ALREADY_LINKED",409);
-  // The insertion is conditional on an unused token; the following update
-  // consumes it in the SAME D1 transaction. Concurrent claims cannot both win.
-  const [added,consumed]=await env.DB.batch([
-    env.DB.prepare("INSERT OR IGNORE INTO user_identities(subject,user_id,provider,created_at) SELECT ?,?,'cloudflare-access',? WHERE EXISTS "+
-      "(SELECT 1 FROM identity_link_tokens WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)")
-      .bind(identity.subject,row.user_id,t,row.id,tokenHash,t),
-    env.DB.prepare("UPDATE identity_link_tokens SET used_at=? WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?")
-      .bind(t,row.id,tokenHash,t)
-  ]);
-  ensure(added.meta.changes===1&&consumed.meta.changes===1,"INVALID_LINK_TOKEN",403);
-  await env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,NULL,'identity.link',NULL,'success',NULL,?)")
-    .bind(crypto.randomUUID(),row.user_id,t).run();
+  // The identity binding, one-time token consumption and Owner audit
+  // commit together. A conflicting subject never burns an unused token.
+  await consumeIdentityLinkToken(env.DB,{
+    subject:identity.subject,userId:row.user_id,email:identity.email,
+    tokenId:row.id,tokenHash,claimedAt:t,auditId:crypto.randomUUID()
+  });
   return response({linked:true});
 }
 function needRole(user:Actor,minimum:"viewer"|"admin"|"owner"){
@@ -109,11 +128,11 @@ async function findNode(env:Env,id:string){
 function isOnline(node:any){return node.status==="online"&&Number(node.last_seen_at)>now()-90;}
 async function freshPairToken(env:Env,user:Actor,nodeId:string){
   const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
-  const hash=await sha256hex(token);
-  await env.DB.prepare("DELETE FROM pairing_tokens WHERE node_id=? AND used_at IS NULL").bind(nodeId).run();
-  await env.DB.prepare("INSERT INTO pairing_tokens(id,node_id,token_hash,expires_at,created_by) VALUES (?,?,?,?,?)")
-    .bind(crypto.randomUUID(),nodeId,hash,now()+600,user.id).run();
-  await audit(env,user,nodeId,"node.pairing_token","created");
+  const hash=await sha256hex(token),t=now();
+  await rotatePairingToken(env.DB,{
+    nodeId,tokenId:crypto.randomUUID(),tokenHash:hash,expiresAt:t+600,
+    createdBy:user.id,auditId:crypto.randomUUID(),createdAt:t
+  });
   return {token,expires_in:600};
 }
 
@@ -121,40 +140,32 @@ async function queueNodeOperation(
   req:Request, env:Env, a:Actor, node:any,
   action:"node.preflight"|"ssh.policy.inspect"|"ssh.daily.install"|"ssh.verification.prepare"|"ssh.password.disable"|"ssh.password.restore"|"ssh.config.rollback"|"ssh.rescue.enable"|"ssh.rescue.revoke", payload:Record<string,unknown>
 ):Promise<Response>{
-  ensure(isOnline(node),"NODE_OFFLINE",409);
   const idem=req.headers.get("Idempotency-Key");
   ensure(idem&&/^[a-zA-Z0-9_-]{12,100}$/.test(idem),"IDEMPOTENCY_KEY_REQUIRED");
-  const exists=await env.DB.prepare("SELECT id,status FROM operations WHERE operator_id=? AND idempotency_key=?").bind(a.id,idem).first<any>();
-  if(exists)return response({operation_id:exists.id,status:exists.status});
+  const existing=await findIdempotentOperation(env.DB,a.id,idem,{nodeId:node.id,action,payload},now());
+  if(existing)return response(existing);
+  ensure(isOnline(node),"NODE_OFFLINE",409);
   ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
-  await env.DB.prepare("UPDATE operations SET status='EXPIRED' WHERE node_id=? AND status='CREATED' AND expires_at<=?").bind(node.id,now()).run();
-  const pending=await env.DB.prepare("SELECT id FROM operations WHERE node_id=? AND status IN ('CREATED','DISPATCHED','RUNNING') AND expires_at>? LIMIT 1").bind(node.id,now()).first();
-  ensure(!pending,"NODE_OPERATION_IN_PROGRESS",409);
+  await assertNodeOperationSlotFree(env.DB,node.id,now());
   const id=crypto.randomUUID(),t=now();
   const cmd={v:1 as const,id,node_id:node.id,action,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload};
   const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
-  await env.DB.batch([
+  try{
+  await withNodeOperationConflictGuard(()=>env.DB.batch([
     env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
       .bind(id,node.id,action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45),
     env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,?,?,?,'requested',?,?)")
       .bind(crypto.randomUUID(),a.id,node.id,action,id,
         typeof payload.reason==="string"?payload.reason.slice(0,280):null,t)
-  ]);
+  ]),
+    ()=>env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,now()).first<{status:string;expires_at:number}>(),now());
+  }catch(error){
+    const replay=await recoverIdempotentInsertConflict(error,()=>
+      findIdempotentOperation(env.DB,a.id,idem,{nodeId:node.id,action,payload},now()));
+    return response(replay);
+  }
   await dispatchPreparedOperation(env,node.id,id,signed);
   return response({operation_id:id,status:"QUEUED"},202);
-}
-
-async function dispatchPreparedOperation(env:Env,nodeId:string,operationId:string,signed:{command:string;signature:string}):Promise<void>{
-  // WSS is opportunistic; if no WSS session accepted delivery, HTTPS poll takes over.
-  try{
-    await env.DB.prepare("UPDATE operations SET status='DISPATCHED' WHERE id=? AND status='CREATED'").bind(operationId).run();
-    const stub=env.NODE_SESSIONS.get(env.NODE_SESSIONS.idFromName(nodeId));
-    const delivered=await stub.fetch("https://node.internal/dispatch",{method:"POST",body:JSON.stringify(signed)});
-    const value=await delivered.json() as {delivered?:number};
-    if(!value.delivered)await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(operationId).run();
-  }catch{
-    await env.DB.prepare("UPDATE operations SET status='CREATED' WHERE id=? AND status='DISPATCHED'").bind(operationId).run();
-  }
 }
 
 async function handle(req:Request,env:Env):Promise<Response>{
@@ -170,9 +181,10 @@ async function handle(req:Request,env:Env):Promise<Response>{
     needRole(a,"owner");
     const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
     const digest=await sha256hex(token),t=now();
-    await env.DB.prepare("INSERT INTO identity_link_tokens(id,user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?,?)")
-      .bind(crypto.randomUUID(),a.id,digest,t+300,t).run();
-    await audit(env,a,null,"identity.link_token","created");
+    await issueIdentityLinkToken(env.DB,{
+      tokenId:crypto.randomUUID(),userId:a.id,tokenHash:digest,expiresAt:t+300,
+      createdAt:t,auditId:crypto.randomUUID()
+    });
     return response({token,expires_in:300});
   }
   if(p==="/api/v1/me"&&req.method==="GET")return response({
@@ -180,7 +192,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
     manual_ssh_actions_enabled:env.MANUAL_SSH_ACTIONS_ENABLED==="true"
   });
   if(p==="/api/v1/nodes"&&req.method==="GET"){
-    const q=await env.DB.prepare("SELECT id,name,ssh_host,ssh_port,login_user,status,init_stage,config_revision,agent_version,os_id,last_seen_at,created_at FROM nodes ORDER BY created_at DESC").all();
+    const q=await env.DB.prepare("SELECT id,name,ssh_host,ssh_port,login_user,status,init_stage,config_revision,agent_version,os_id,last_seen_at,created_at,group_name,notes FROM nodes ORDER BY created_at DESC").all();
     return response({nodes:q.results});
   }
   if(p==="/api/v1/nodes"&&req.method==="POST"){
@@ -188,16 +200,35 @@ async function handle(req:Request,env:Env):Promise<Response>{
     const name=String(b.name||"").trim(),host=String(b.ssh_host||"").trim(),login=String(b.login_user||"").trim();
     const port=Number(b.ssh_port||22);
     ensure(name.length>=1&&name.length<=80&&safeHost(host)&&safeUser(login)&&Number.isInteger(port)&&port>0&&port<65536,"INVALID_NODE");
-    const id=crypto.randomUUID();
-    await env.DB.prepare("INSERT INTO nodes(id,name,ssh_host,ssh_port,login_user,created_at) VALUES (?,?,?,?,?,?)")
-      .bind(id,name,host,port,login,now()).run();
-    await audit(env,a,id,"node.create","ok");
-    return response({node_id:id,...await freshPairToken(env,a,id)},201);
+    const id=crypto.randomUUID(),t=now();
+    const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const tokenHash=await sha256hex(token);
+    await createNodeWithPairingToken(env.DB,{
+      id,name,host,port,loginUser:login,createdAt:t,
+      tokenId:crypto.randomUUID(),tokenHash,tokenExpiresAt:t+600,
+      createdBy:a.id,auditId:crypto.randomUUID()
+    });
+    return response({node_id:id,token,expires_in:600},201);
   }
   const nodeMatch=/^\/api\/v1\/nodes\/([a-f0-9-]{36})(?:\/(.+))?$/.exec(p);
   if(nodeMatch){
     const node=await findNode(env,nodeMatch[1]),sub=nodeMatch[2]||"";
     if(!sub&&req.method==="GET")return response({node});
+    if(!sub&&req.method==="PATCH"){
+      needRole(a,"admin");
+      const current={
+        name:node.name,group_name:node.group_name||"",notes:node.notes||"",
+        ssh_host:node.ssh_host,ssh_port:node.ssh_port,login_user:node.login_user,status:node.status
+      };
+      let changes;
+      try{changes=parseNodeChanges(await bodyJSON(req),current);}
+      catch(e){throw new ApiError(e instanceof Error?e.message:"INVALID_NODE_SETTINGS",400);}
+      const update=buildNodeSettingsUpdate(node.id,current,changes);
+      await persistNodeSettingsUpdate(env.DB,update,{
+        auditId:crypto.randomUUID(),actorId:a.id,nodeId:node.id,createdAt:now()
+      });
+      return response({node:{...node,...changes}});
+    }
     if(sub==="pairing-token"&&req.method==="POST"){
       needRole(a,"admin");
       ensure(node.status==="unpaired","NODE_ALREADY_PAIRED",409);
@@ -227,12 +258,10 @@ async function handle(req:Request,env:Env):Promise<Response>{
       const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",Uint8Array.from(raw)));
       const fingerprint="SHA256:"+btoa(String.fromCharCode(...digest)).replace(/=+$/,"");
       ensure(b.confirm_fingerprint===fingerprint,"PROOF_FINGERPRINT_CONFIRMATION_REQUIRED",403);
-      const result=await env.DB.prepare(
-        "INSERT OR IGNORE INTO node_ssh_proof_keys(node_id,public_key,fingerprint,approved_by,created_at) "+
-        "VALUES (?,?,?,?,?)"
-      ).bind(node.id,publicKey,fingerprint,a.id,now()).run();
-      ensure(result.meta.changes===1,"NODE_PROOF_KEY_ALREADY_PINNED",409);
-      await audit(env,a,node.id,"ssh.proof-key.pin","ok");
+      await persistRootProofPin(env.DB,{
+        nodeId:node.id,publicKey,fingerprint,actorId:a.id,
+        auditId:crypto.randomUUID(),createdAt:now()
+      });
       return response({node_id:node.id,fingerprint,pinned:true},201);
     }
     if(sub==="preflight"&&req.method==="POST"){
@@ -245,6 +274,9 @@ async function handle(req:Request,env:Env):Promise<Response>{
     }
     if(sub==="daily-key/install"&&req.method==="POST"){
       needRole(a,"admin");
+      // First pin the Root trust key on this exact VPS. The Agent cannot
+      // register or replace it and must not act as its own SSH write proof.
+      await requirePinnedRootForDailyInstall(env.DB,node.id);
       // The Agent must still reject privileged SSH writes while the P3 helper
       // and authenticated login-proof workflow are incomplete.
       const key=await env.DB.prepare("SELECT * FROM public_keys WHERE purpose='daily' AND active=1").first<any>();
@@ -282,20 +314,16 @@ async function handle(req:Request,env:Env):Promise<Response>{
       });
       ensure(!blocker,blocker||"NOT_READY",409);
       const t=now();
-      await env.DB.prepare(
-        "UPDATE ssh_verifications SET status='EXPIRED' WHERE node_id=? AND status='PENDING' AND expires_at<=?"
-      ).bind(node.id,t).run();
+      // A pending challenge is single-flight. Expired rows are transitioned
+      // within persistVerificationStart's audited D1 batch, never before it.
       const active=await env.DB.prepare(
-        "SELECT id FROM ssh_verifications WHERE node_id=? AND status='PENDING' LIMIT 1"
-      ).bind(node.id).first();
+        "SELECT id FROM ssh_verifications WHERE node_id=? AND status='PENDING' AND expires_at>? LIMIT 1"
+      ).bind(node.id,t).first();
       ensure(!active,"VERIFICATION_ALREADY_PENDING",409);
       const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
       const nonceHash=await sha256hex(token),id=crypto.randomUUID(),expires=t+VERIFICATION_TTL_SECONDS;
       ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
-      const pendingOp=await env.DB.prepare(
-        "SELECT id FROM operations WHERE node_id=? AND status IN ('CREATED','DISPATCHED','RUNNING') AND expires_at>? LIMIT 1"
-      ).bind(node.id,t).first();
-      ensure(!pendingOp,"NODE_OPERATION_IN_PROGRESS",409);
+      await assertNodeOperationSlotFree(env.DB,node.id,t);
       const operationId=crypto.randomUUID();
       const cmd={
         v:1 as const,id:operationId,node_id:node.id,action:"ssh.verification.prepare" as const,
@@ -307,18 +335,20 @@ async function handle(req:Request,env:Env):Promise<Response>{
         }
       };
       const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
-      // These records commit together. A failed signed preparation cannot
-      // leave a PENDING verification without an operation to dispatch.
-      await env.DB.batch([
-        env.DB.prepare(
-          "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,config_revision,nonce_hash,status,"+
-          "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)"
-        ).bind(id,node.id,key.fingerprint,node.login_user,node.config_revision,nonceHash,t,expires,key.id,a.id),
-        env.DB.prepare(
-          "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
-        ).bind(operationId,node.id,cmd.action,a.id,"verify-"+id,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45)
-      ]);
-      await audit(env,a,node.id,"ssh.verification.start","PENDING",null,id);
+      // Both the PENDING challenge and signed preparation operation must
+      // survive with their attribution audit, or none of them is created.
+      await withNodeOperationConflictGuard(
+        ()=>persistVerificationStart(env.DB,{
+          nodeId:node.id,verificationId:id,operationId,auditId:crypto.randomUUID(),
+          operatorId:a.id,keyId:key.id,keyFingerprint:key.fingerprint,
+          loginUser:node.login_user,configRevision:node.config_revision,
+          nonceHash,createdAt:t,expiresAt:expires,operationExpiresAt:t+45,
+          signedCommand:signed.command,signature:signed.signature
+        }),
+        ()=>env.DB.prepare(PENDING_NODE_OPERATION_SQL)
+          .bind(node.id,now()).first<{status:string;expires_at:number}>(),
+        now()
+      );
       await dispatchPreparedOperation(env,node.id,operationId,signed);
       // No endpoint currently trusts a browser-issued 'verified' claim.
       // The nonce is returned once and NEVER stored as plaintext in D1.
@@ -333,34 +363,26 @@ async function handle(req:Request,env:Env):Promise<Response>{
         "FROM ssh_verifications WHERE id=? AND node_id=?"
       ).bind(verificationMatch[1],node.id).first<any>();
       ensure(verification,"VERIFICATION_NOT_FOUND",404);
-      if(verification.status==="PENDING"&&verification.expires_at<=now()){
-        await env.DB.prepare("UPDATE ssh_verifications SET status='EXPIRED' WHERE id=? AND status='PENDING'").bind(verification.id).run();
-        verification.status="EXPIRED";
-      }
       if(sub.endsWith("/cancel")&&req.method==="POST"){
-        ensure(verification.status==="PENDING","VERIFICATION_NOT_PENDING",409);
-        await env.DB.prepare(
-          "UPDATE ssh_verifications SET status='CANCELLED',invalidated_at=? WHERE id=? AND status='PENDING'"
-        ).bind(now(),verification.id).run();
-        await audit(env,a,node.id,"ssh.verification.cancel","CANCELLED",null,verification.id);
+        // The predicate inside the D1 batch decides, not this stale read:
+        // concurrent Root VERIFIED, expiry or prior cancellation -> HTTP 409.
+        await cancelPendingVerification(env.DB,{
+          nodeId:node.id,verificationId:verification.id,
+          actorId:a.id,auditId:crypto.randomUUID(),at:now()
+        });
         return response({verification_id:verification.id,status:"CANCELLED"});
       }
       if(req.method==="GET"){
+        // Status projection is read-only: a GET must not perform an
+        // unaudited expiry or invalidation, even if a proof is racing it.
         const activeKey=await env.DB.prepare(
           "SELECT id FROM public_keys WHERE purpose='daily' AND active=1"
         ).first<{id:string}>();
-        if(verification.status==="PENDING"&&
-           (verification.config_revision!==node.config_revision||
-            verification.public_key_id!==activeKey?.id)){
-          await env.DB.prepare(
-            "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE id=? AND status='PENDING'"
-          ).bind(now(),verification.id).run();
-          verification.status="INVALIDATED";
-        }
-        // Never send nonce_hash or any credentials back from a read endpoint.
-        return response({verification:{...verification,
-          status:verificationStatus(verification.status,verification.expires_at,now())},
-          trusted_proof_available:verification.status==="VERIFIED"});
+        const status=projectVerificationReadStatus(
+          verification,now(),node.config_revision,activeKey?.id
+        );
+        return response({verification:{...verification,status},
+          trusted_proof_available:status==="VERIFIED"});
       }
     }
     const manualActions:Record<string,
@@ -466,31 +488,33 @@ async function handle(req:Request,env:Env):Promise<Response>{
     needRole(a,"owner");const b=await bodyJSON(req);
     ensure(typeof b.public_key==="string" && b.public_key.length<2048,"KEY_INVALID");
     const key=await parsePublicKey(b.public_key);
-    const purpose=keyMatch[1],version=Number((await env.DB.prepare("SELECT max(version) AS v FROM public_keys WHERE purpose=?").bind(purpose).first<{v:number|null}>())?.v||0)+1;
+    const purpose=keyMatch[1] as "daily"|"rescue";
     const id=crypto.randomUUID(),name=String(b.name||purpose).slice(0,80);
-    // A D1 batch is transactional; changing global settings NEVER installs keys.
-    const changes=[
-      env.DB.prepare("UPDATE public_keys SET active=0 WHERE purpose=?").bind(purpose),
-      env.DB.prepare("INSERT INTO public_keys(id,purpose,name,algorithm,public_key,fingerprint,version,active,created_by,created_at) VALUES (?,?,?,?,?,?,?,1,?,?)")
-        .bind(id,purpose,name,key.algorithm,key.normalized,key.fingerprint,version,a.id,now())
-    ];
-    // Rotating the global daily key revokes any previously issued verification
-    // challenge, without modifying keys on the actual VPS.
-    if(purpose==="daily"){
-      changes.push(env.DB.prepare(
-        "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE status='PENDING'"
-      ).bind(now()));
-    }
-    await env.DB.batch(changes);
-    await audit(env,a,null,"keys."+purpose+".update","ok");
+    const version=await rotateGlobalPublicKey(env.DB,{
+      id,purpose,name,algorithm:key.algorithm,publicKey:key.normalized,
+      fingerprint:key.fingerprint,actorId:a.id,auditId:crypto.randomUUID(),createdAt:now()
+    });
     return response({id,purpose,fingerprint:key.fingerprint,version,installed_nodes:0});
+  }
+  if(p==="/api/v1/operations"&&req.method==="GET"){
+    const nodeId=url.searchParams.get("node_id");
+    if(nodeId)ensure(validNodeId(nodeId),"INVALID_NODE_ID",400);
+    const q=nodeId?
+      await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations WHERE node_id=? ORDER BY created_at DESC LIMIT 100").bind(nodeId).all():
+      await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations ORDER BY created_at DESC LIMIT 100").all();
+    const at=now();
+    return response({operations:q.results.map((op:any)=>({
+      ...op,status:projectOperationStatus(op,at)
+    }))});
   }
   const opMatch=/^\/api\/v1\/operations\/([a-f0-9-]{36})$/.exec(p);
   if(opMatch&&req.method==="GET"){
     const op=await env.DB.prepare("SELECT id,node_id,action,status,result_code,detail,created_at,expires_at,finished_at FROM operations WHERE id=?").bind(opMatch[1]).first<any>();
-    if(op?.status==="CREATED"&&op.expires_at<=now()){await env.DB.prepare("UPDATE operations SET status=\'EXPIRED\' WHERE id=? AND status=\'CREATED\'").bind(op.id).run();op.status="EXPIRED";}
-    if(op?.status==="DISPATCHED"&&op.expires_at<=now())op.status="RESULT_UNKNOWN";
-    ensure(op,"OPERATION_NOT_FOUND",404);return response({operation:op});
+    ensure(op,"OPERATION_NOT_FOUND",404);
+    const effectiveStatus=projectOperationStatus(op,now());
+    if(op.status==="CREATED"&&effectiveStatus==="EXPIRED")
+      await env.DB.prepare("UPDATE operations SET status='EXPIRED' WHERE id=? AND status='CREATED'").bind(op.id).run();
+    return response({operation:{...op,status:effectiveStatus}});
   }
   if(p==="/api/v1/audit"&&req.method==="GET"){
     needRole(a,"owner");

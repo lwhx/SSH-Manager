@@ -19,8 +19,8 @@
 1. 先确保服务商串行/VNC 控制台和原有 SSH 会话可用，明确这台 VPS 与生产环境完全隔离。
 2. 安装三个 Go 程序：SSH Manager Agent、Root Helper、普通用户可执行的 ssh-manager-prove。保持关闭密码登录功能禁用。
 3. 只读执行：sudo python3 scripts/staging_proof_preflight.py --staging-only。出现 FAIL 直接阻断；WARN 要人工确认，不能当作验证成功。
-4. 在单台 VPS 手动安装日常公钥，使用匹配的私钥建立新的 SSH 连接，确认服务器主机公钥已校验，禁止密码回退及旧连接复用。
-5. Root Helper 独立生成证明密钥；Owner 通过 VPS 控制台单独核对并为本节点固定其公钥及 SHA256 指纹。
+4. **先固定 Root 身份，再安装日常公钥**：Root Helper 在隔离 VPS 本机生成独立 Ed25519 证明密钥；Owner 通过服务商控制台独立核对，并在 SSH Manager 为这台 VPS 固定其公钥与 SHA256 指纹。Root 私钥只存放在 VPS 的 root 私有目录，不上传 Agent 或 Cloudflare。缺少固定公钥时，服务端拒绝下发 `ssh.daily.install`。
+5. 在当前选中的单台 VPS 手动安装日常公钥。Root Helper 必须先确认能签发结果回执，完成后签名证明密钥指纹、操作 UUID、命令版本及结果；Agent 仅负责转发。随后使用匹配的私钥建立新的 SSH 连接，确认服务器主机公钥已校验，禁止密码回退及旧连接复用。**写入或同步结果不确定时，不得将 FAILED 当作未执行，必须保持单节点操作锁并人工核查。**
 6. 创建五分钟挑战，等到本机准备完成，再通过加密 SSH 标准输入调用 ssh-manager-prove。
 7. Root Helper 必须观察到可信 journald syslog/journal 认证事件、匹配的 SSH 连接和 Linux 进程祖先链。stdout、错误 PID、其他 Linux 用户、错误指纹、过期挑战一律拒绝。
 8. Cloudflare 使用 Owner 固定的本机公钥验签，然后在一个 D1 事务里同时更新挑战 VERIFIED、节点 KEY_VERIFIED、日常密钥 verified_at、审计日志。审计 Actor 是签发挑战的实际管理员，不是 Agent 或 challenge UUID。

@@ -33,9 +33,24 @@
 > Cloudflare Workers Builds 名称错位导致签名私钥上传到另一 Worker 时，请勿删除已创建的 D1。修复请查看 [签名密钥安全恢复指南](docs/CLOUDFLARE_SPLIT_SIGNER_RECOVERY.md)。
 
 
+## 管理面板导航
+
+新版管理面板参考 Komari 的信息层级，但不代替 Komari 的系统资源监控：
+
+- **仪表盘**：节点数量、Agent 在线情况以及待初始化节点概览。
+- **VPS 节点**：全宽服务器列表，支持名称/IP 搜索、在线状态、分组过滤、排序；添加 VPS 使用独立三步向导。
+- **单节点详情**：概览、Agent 管理、SSH 安全、操作记录、节点设置，所有危险操作只针对当前节点。
+- **双公钥管理**：保存日常/救援公钥，不会因此自动推送到任何 VPS。
+- **任务中心**：只读展示最近 100 条操作，显示 RESULT_UNKNOWN（结果未知）并要求人工核查；不提供危险操作的自动重试。
+- **操作审计**：Owner 可查看操作记录；**系统设置**显示现有的云端配置与安全开关。
+
+节点详情使用 `#/nodes/<UUID>?tab=ssh` 等哈希地址；只包含节点标识及页签，不保存配对令牌或 SSH 私钥。编辑已配对节点时，SSH 主机、端口和登录用户在前后端均锁定；分组、备注和展示名称可编辑并记录审计。首次上线必须由 Staging D1 增量迁移应用 `0007_node_metadata.sql`，官方部署脚本先迁移再部署 Worker。
+
+**管理台改版验收**：[VPS 节点列表、配对向导与任务中心 Staging 验收清单](docs/VPS_CONSOLE_STAGING_ACCEPTANCE.md)。所有真实 VPS 试验仍必须先经过安全关卡。
+
 ## Linux VPS Agent 安装与配对（Staging）
 
-管理端部署成功不等于 VPS 已连接。**进入「VPS 管理」→ 选中 WAITING_PAIR 节点**，面板会显示 **Agent 安装与配对** 向导：复制绑定了当前 Worker Git commit 的安装命令到 Debian/Ubuntu systemd 测试 VPS；安装器自动构建并启动非 root Agent，完成配对时从交互终端读取十分钟一次性令牌（不出现在命令行/日志）。Token 过期可以在同一节点点击「重新生成配对令牌」，无需删除节点。
+管理端部署成功不等于 VPS 已连接。**进入「VPS 节点」→「添加 VPS」→「基本信息」→「安装 Agent」→「确认连接」**，或从服务器列表打开已有节点的 **「Agent 管理」** 页签，面板会显示 **Agent 安装与配对** 向导：复制绑定了当前 Worker Git commit 的安装命令到 Debian/Ubuntu systemd 测试 VPS；安装器自动构建并启动非 root Agent，完成配对时从交互终端读取十分钟一次性令牌（不出现在命令行/日志）。Token 过期可以在同一节点点击「重新生成配对令牌」，无需删除节点。
 
 本向导只完成 Agent 设备注册、心跳、WSS/HTTPS 通讯；Root Helper 的配置、SSH 公钥修改及可信认证证明仍按 [P3 实机 Runbook](docs/P3_STAGING_LIVE_RUNBOOK.md) **人工逐台验收**，不能用生产 VPS 直接测试。安装脚本需要 curl、tar、Go 1.23+。
 

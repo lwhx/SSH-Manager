@@ -8,6 +8,7 @@
 - GitHub Actions 的常规 CI 必须通过：Go go test -race ./...、go vet、Root Helper 测试、TS check、Vitest、SQLite migrations、local workerd + D1、隔离 OpenSSH 回环新连接。
 - 手动 `workflow_dispatch` 的打包工作流仅生成 Linux amd64/arm64 二进制与 SHA256SUMS，不部署 VPS、Cloudflare 或自动发布生产版本。
 - 产物校验通过哈希和可信 GitHub Actions 运行来源，不将 SHA256SUMS 误称为数字签名。正式版本还需要组织批准的签名与可重复构建策略。
+- **依赖可复现性仍是发布阻断项**：当前仓库尚无 `package-lock.json`，CI 使用 `npm install` 会动态解析传递依赖。正式合并/发布前必须由受信任环境生成并审查 lockfile，将 CI 改为 `npm ci`，校验依赖完整性与 SBOM；`rollup` 临时版本覆盖不能代替完整 lockfile。
 
 ## 2. 发行版兼容性矩阵
 
@@ -30,6 +31,35 @@
 - 验证 Agent 和 Root Helper 权限、systemd沙箱、SO_PEERCRED、root 私钥0600、文件安全打开、非 root Agent、失败状态人工核查。
 - 渗透/故障注入：错角色、跨节点、重放、过期签名、Root 回执篡改、网络断开、Cloudflare 5xx、Root journaling fsync 失败、D1 audit abort、配置 symlink、用户UID变更。
 - 最后由 Owner 人工批准具体节点可执行操作范围；不得一键对所有 VPS 启用密钥或救援。
+
+### Root 证明公钥历史审计一致性（只读）
+
+Owner 为单台 VPS 固定 Root Ed25519 公钥属于信任锚操作：`node_ssh_proof_keys` 的新增记录与 `ssh.proof-key.pin` 审计必须在**同一个 D1 batch** 提交。现有代码保证后续新增为原子写入，但较早版本的历史绑定可能已在审计异常时单独提交。
+
+在 **Staging D1** 上，发布前可只读执行：
+
+```sql
+SELECT p.node_id, p.approved_by, p.created_at
+FROM node_ssh_proof_keys AS p
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM audit_logs AS a
+  WHERE a.node_id = p.node_id
+    AND a.actor_id = p.approved_by
+    AND a.action = 'ssh.proof-key.pin'
+    AND a.result = 'ok'
+);
+```
+
+返回 0 行才表示这项基础关联检查没有发现缺失审计；**不代表公钥来源已经独立核实**。如果有记录，阻止该节点的密钥安装与高危 SSH 写操作，先由 Owner 从服务商控制台重新核对 Root 公钥和不可变审计来源。不得自动补写历史审计、替换已固定公钥、批量解除操作锁或据此认定结果成功。不要在诊断报告中打印公钥、私钥、令牌或其他凭证。
+
+### Staging D1 数据完整性只读准入
+
+在批准任何部署、人工 SSH 安全写入或 PR 合并前，先由 Owner 和独立审查者完成 [Staging D1 只读预检](STAGING_D1_READONLY_PREFLIGHT.md)。先核对已固定的 Git SHA、Cloudflare 账户、现有 Worker 数据库绑定与 Staging D1 UUID，再根据明确授权运行 `scripts/staging_d1_readonly_preflight.py`。该工具默认只输出查询计划；只有显式 `--execute-remote` 才会使用项目安装的 Wrangler 发起**固定聚合 SELECT**。
+
+检查至少包含：Root 公钥绑定审计、跨 VPS Root 证明公钥复用、单 VPS 未结束操作锁（任何 DISPATCHED/RUNNING 均阻断，TTL 不解锁）、终态操作审计缺失/重复、VERIFIED 证明一致性、PENDING 旧配置或无效日常密钥、版本冲突、配对审计。所有异常只汇报数量，禁止自动补写审计、释放锁、更新密钥、修改 D1 或执行远端 SSH 操作。
+
+退出码 `0` **只表示该次 D1 完整性检查通过**；`2` 为阻断，`3` 为需要人工判断的 WARN，`4` 为只显示计划、根本没有执行检查。即便 `0`，仍必须完成独立 GitHub 安全 Review、Cloudflare Access/RBAC 浏览器验收、T01–T11、真实独立 VPS 的 Root Helper 与手动恢复测试，才能讨论发布。
 
 ## 4. 发布方式
 

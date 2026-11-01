@@ -25,10 +25,14 @@ const id={
  verify2:"70000000-0000-4000-8000-000000000001",
  proof:"80000000-0000-4000-8000-000000000001",
  keyRow:"90000000-0000-4000-8000-000000000001",
+ pairNode:"a0000000-0000-4000-8000-000000000001",
+ pairToken:"b0000000-0000-4000-8000-000000000001",
 };
 const rev="a".repeat(64),nonceHash="b".repeat(64);
 const fingerprint="SHA256:"+"A".repeat(43);
 const t=Math.floor(Date.now()/1000);
+const pairingToken="local-only-pairing-token-"+"x".repeat(24);
+const pairingTokenHash=createHash("sha256").update(pairingToken).digest("hex");
 const toURL=b=>Buffer.from(b).toString("base64url");
 const q=s=>"'"+String(s).replaceAll("'","''")+"'";
 let worker;
@@ -46,18 +50,20 @@ function insert(table,columns,values){
  return "INSERT INTO "+table+"("+columns.join(",")+") VALUES ("+
    values.map(v=>v===null?"NULL":typeof v==="number"?String(v):q(v)).join(",")+");";
 }
-function seedSql(devicePublic,rootPublic){
- const cmd=(operation,verification)=>JSON.stringify({
+function verificationPrepareOp(operation,verification){
+ const command=JSON.stringify({
   v:1,id:operation,node_id:id.node,action:"ssh.verification.prepare",
   actor:id.actor,expected_revision:rev,
   payload:{verification_id:verification,nonce_hash:nonceHash,login_user:"root",
    fingerprint,key_id:id.key,config_revision:rev}
  });
- const op=(operation,verification)=>insert("operations",[
+ return insert("operations",[
   "id","node_id","action","operator_id","idempotency_key","expected_revision",
   "command_json","signature","status","created_at","expires_at"
  ],[operation,id.node,"ssh.verification.prepare",id.actor,"prepare-"+verification,
-  rev,cmd(operation,verification),"fixture-signer","DISPATCHED",t-5,t+300]);
+  rev,command,"fixture-signer","DISPATCHED",t-5,t+300]);
+}
+function seedSql(devicePublic,rootPublic){
  const challenge=(verification)=>insert("ssh_verifications",[
   "id","node_id","key_fingerprint","login_user","config_revision",
   "nonce_hash","status","created_at","expires_at","public_key_id","issued_by"
@@ -68,6 +74,10 @@ function seedSql(devicePublic,rootPublic){
    [id.actor,"owner@ci.invalid","owner","active",t-100]),
   insert("nodes",["id","name","ssh_host","login_user","status","init_stage","config_revision","created_at"],
    [id.node,"local-worker-ci","192.0.2.10","root","online","WAITING_VERIFICATION",rev,t-100]),
+  insert("nodes",["id","name","ssh_host","login_user","status","init_stage","config_revision","created_at"],
+   [id.pairNode,"pairing-fixture","192.0.2.11","root","unpaired","WAITING_PAIR","unverified",t-100]),
+  insert("pairing_tokens",["id","node_id","token_hash","expires_at","created_by"],
+   [id.pairToken,id.pairNode,pairingTokenHash,t+600,id.actor]),
   insert("agent_credentials",["node_id","public_key","paired_at"],
    [id.node,devicePublic,t-50]),
   insert("public_keys",["id","purpose","name","algorithm","public_key","fingerprint","version","created_by","created_at"],
@@ -76,7 +86,8 @@ function seedSql(devicePublic,rootPublic){
    [id.keyRow,id.node,id.key,"root","daily","installed"]),
   insert("node_ssh_proof_keys",["node_id","public_key","fingerprint","approved_by","created_at"],
    [id.node,rootPublic,"SHA256:local-fixture",id.actor,t-60]),
-  op(id.op,id.verify),op(id.op2,id.verify2),
+  // The second operation is inserted only after the first terminal result.
+  verificationPrepareOp(id.op,id.verify),
   challenge(id.verify)
  ].join("\n");
 }
@@ -167,6 +178,46 @@ async function main(){
  boundary=await fetch(host+"/agent/v1/health");
  assert.equal(boundary.status,200,"Agent hostname failed to route");
  assert.equal((await boundary.json()).agent_auth,"device-ed25519");
+ // Agent pairing must be audited in the same D1 transaction as credential
+ // creation and one-time token consumption. An audit failure must roll back all.
+ const pairingDevice=await webcrypto.subtle.generateKey("Ed25519",true,["sign","verify"]);
+ const pairingPublic=toURL(await webcrypto.subtle.exportKey("raw",pairingDevice.publicKey));
+ d1(["--command","CREATE TRIGGER ci_fail_agent_pair_audit BEFORE INSERT ON audit_logs "+
+  "WHEN NEW.action='agent.pair' BEGIN SELECT RAISE(ABORT, 'CI_ABORT_PAIR_AUDIT'); END"]);
+ let pairResponse=await fetch(host+"/agent/v1/pair",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({node_id:id.pairNode,token:pairingToken,public_key:pairingPublic})});
+ assert.equal(pairResponse.status,500,"Audit failure must abort the pairing transaction");
+ let pairState=query("SELECT (SELECT COUNT(*) FROM agent_credentials WHERE node_id="+q(id.pairNode)+
+  ") AS credentials,(SELECT used_at FROM pairing_tokens WHERE id="+q(id.pairToken)+
+  ") AS used_at,(SELECT status FROM nodes WHERE id="+q(id.pairNode)+
+  ") AS node_status,(SELECT COUNT(*) FROM audit_logs WHERE node_id="+q(id.pairNode)+
+  " AND action='agent.pair') AS audit_count");
+ assert.equal(pairState[0].credentials,0,"credential insert must roll back with audit failure");
+ assert.equal(pairState[0].used_at,null,"pairing token must remain unused after rollback");
+ assert.equal(pairState[0].node_status,"unpaired");
+ assert.equal(pairState[0].audit_count,0);
+ d1(["--command","DROP TRIGGER ci_fail_agent_pair_audit"]);
+ pairResponse=await fetch(host+"/agent/v1/pair",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({node_id:id.pairNode,token:pairingToken,public_key:pairingPublic})});
+ assert.equal(pairResponse.status,201,JSON.stringify(await pairResponse.clone().json()));
+ pairState=query("SELECT (SELECT COUNT(*) FROM agent_credentials WHERE node_id="+q(id.pairNode)+
+  ") AS credentials,(SELECT used_at FROM pairing_tokens WHERE id="+q(id.pairToken)+
+  ") AS used_at,(SELECT status FROM nodes WHERE id="+q(id.pairNode)+
+  ") AS node_status,(SELECT COUNT(*) FROM audit_logs WHERE node_id="+q(id.pairNode)+
+  " AND action='agent.pair') AS audit_count");
+ assert.equal(pairState[0].credentials,1);
+ assert(pairState[0].used_at>0);
+ assert.equal(pairState[0].node_status,"online");
+ assert.equal(pairState[0].audit_count,1,"successful pairing must create exactly one audit event");
+ const pairReplay=await fetch(host+"/agent/v1/pair",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({node_id:id.pairNode,token:pairingToken,public_key:pairingPublic})});
+ expectCode({status:pairReplay.status,json:await pairReplay.json()},409,"NODE_ALREADY_PAIRED");
+ assert.equal(query("SELECT COUNT(*) AS count FROM audit_logs WHERE node_id="+q(id.pairNode)+
+  " AND action='agent.pair'")[0].count,1,"replayed pairing must not duplicate audit");
+
  // Raw unsigned HTTP, even with a valid device ID, can never mutate D1.
  let res=await fetch(host+"/agent/v1/report",{method:"POST",
   headers:{"Content-Type":"application/json"},
@@ -231,6 +282,9 @@ async function main(){
   "nonce_hash","status","created_at","expires_at","public_key_id","issued_by"
  ],[id.verify2,id.node,fingerprint,"root",rev,nonceHash,
    "PENDING",t-5,t+300,id.key,id.actor])]);
+ // The previous operation has a terminal result, so the next can be
+ // dispatched without violating per-node single-flight.
+ d1(["--command",verificationPrepareOp(id.op2,id.verify2)]);
  // Simulate D1 audit insertion failure while a second helper prepare report
  // arrives. The Worker must not leave operations SUCCEEDED without
  // ssh_verifications.prepared_at.
@@ -255,6 +309,66 @@ async function main(){
  assert.equal(rows[0].operation_status,"SUCCEEDED");
  assert(rows[0].prepared_at>0);
  
+ // Real workerd + D1: simultaneous signed Agent reports must commit exactly
+ // ONE terminal audit. A stale second CAS may only become an idempotent
+ // acknowledgement of the exact first result, never another audit/write.
+ const racingOp="e0000000-0000-4000-8000-000000000001";
+ const racingAt=Math.floor(Date.now()/1000);
+ const racingCommand=JSON.stringify({
+  v:1,id:racingOp,node_id:id.node,actor:id.actor,action:"node.preflight",
+  expected_revision:rev,issued_at:racingAt-3,expires_at:racingAt+45,
+  payload:{login_user:"root",ssh_port:22}
+ });
+ d1(["--command",insert("operations",[
+  "id","node_id","action","operator_id","idempotency_key","expected_revision",
+  "command_json","signature","status","created_at","expires_at"
+ ],[racingOp,id.node,"node.preflight",id.actor,"ci-race-"+racingOp,
+  rev,racingCommand,"ci-signed-command","DISPATCHED",racingAt-3,racingAt+45])]);
+ const raceReport={operation_id:racingOp,status:"SUCCEEDED",
+  result_code:"READ_ONLY_DIAGNOSTIC",detail:{check:"local-only",verified_login:false}};
+ const racing=await Promise.all(Array.from({length:5},()=>
+  send("/agent/v1/report",raceReport,device)));
+ for(const response of racing){
+  assert.equal(response.status,200,JSON.stringify(response.json));
+ }
+ const raceAudit=query("SELECT COUNT(*) AS n FROM audit_logs WHERE operation_id="+q(racingOp)+
+  " AND action='node.preflight' AND result='SUCCEEDED'")[0].n;
+ assert.equal(raceAudit,1,"concurrent terminal reports inserted duplicate audit rows");
+ const raceState=query("SELECT status FROM operations WHERE id="+q(racingOp))[0].status;
+ assert.equal(raceState,"SUCCEEDED");
+ expectCode(await send("/agent/v1/report",{
+  ...raceReport,detail:{check:"DIFFERENT"}
+ },device),409,"CONFLICTING_OPERATION_REPORT");
+ assert.equal(query("SELECT COUNT(*) AS n FROM audit_logs WHERE operation_id="+q(racingOp))[0].n,1,
+  "conflicting terminal replay inserted extra audit");
+
+ // Concurrent CONFLICTING reports (not just a later replay) must select one
+ // durable winner. The losing report must never write another terminal audit.
+ const conflictOp="f0000000-0000-4000-8000-000000000001";
+ const conflictAt=Math.floor(Date.now()/1000);
+ d1(["--command",insert("operations",[
+  "id","node_id","action","operator_id","idempotency_key","expected_revision",
+  "command_json","signature","status","created_at","expires_at"
+ ],[conflictOp,id.node,"node.preflight",id.actor,"ci-conflict-"+conflictOp,
+  rev,JSON.stringify({v:1,id:conflictOp,node_id:id.node,action:"node.preflight",
+   actor:id.actor,issued_at:conflictAt-3,expires_at:conflictAt+45,
+   expected_revision:rev,payload:{login_user:"root"}}),
+  "ci-signed-command","DISPATCHED",conflictAt-3,conflictAt+45])]);
+ const conflictingReports=await Promise.all([
+  send("/agent/v1/report",{
+   operation_id:conflictOp,status:"SUCCEEDED",result_code:"READ_ONLY_DIAGNOSTIC",
+   detail:{source:"first"}
+  },device),
+  send("/agent/v1/report",{
+   operation_id:conflictOp,status:"SUCCEEDED",result_code:"READ_ONLY_DIAGNOSTIC",
+   detail:{source:"second"}
+  },device)
+ ]);
+ assert.deepEqual(conflictingReports.map(r=>r.status).sort((a,b)=>a-b),[200,409],
+  "different concurrent terminal results must have one winner and one conflict");
+ assert.equal(query("SELECT COUNT(*) AS n FROM audit_logs WHERE operation_id="+q(conflictOp))[0].n,
+  1,"conflicting terminal reports generated duplicate audit");
+
  // P4/P5: exercise the ACTUAL local Gateway and D1 with a per-node Root
  // operation receipt (the Agent only transports it, never signs it).
  const special={
@@ -280,14 +394,15 @@ async function main(){
     "signed-command-fixture","DISPATCHED",tick-5,tick+45])]);
   return command;
  }
- async function rootTerminal(command,resultCode,result){
+ async function rootTerminal(command,resultCode,result,{failed=false,noWrite=false}={}){
   const receipt={v:1,node_id:id.node,operation_id:command.id,
    action:command.action,result_code:resultCode,
    expected_revision:command.expected_revision,
    detail_sha256:createHash("sha256").update(JSON.stringify(result)).digest("hex"),
    executed_at:command.issued_at+5};
+  if(noWrite)receipt.no_ssh_write=true;
   const payload=JSON.stringify(receipt);
-  return {operation_id:command.id,status:"SUCCEEDED",result_code:resultCode,
+  return {operation_id:command.id,status:failed?"FAILED":"SUCCEEDED",result_code:resultCode,
    detail:{result,root_receipt:{payload,
     signature:toURL(await webcrypto.subtle.sign("Ed25519",rootKey.privateKey,
       new TextEncoder().encode(payload)))}}};
@@ -316,6 +431,32 @@ async function main(){
   "invalid snapshot must abort the full D1 transaction");
  assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
   "DISPATCHED","D1 committed failed snapshot transition");
+ // Agent-authenticated FAILED MUST NOT release this VPS without an
+ // independently signed Root receipt attesting that no SSH write occurred.
+ const failedUnsigned={operation_id:special.badRestore,status:"FAILED",
+  result_code:"MANUAL_NODE_CONFIRMATION_REQUIRED",
+  detail:{result:{code:"MANUAL_NODE_CONFIRMATION_REQUIRED"}}};
+ expectCode(await send("/agent/v1/report",failedUnsigned,device),403,"ROOT_MANUAL_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
+  "DISPATCHED","unsigned FAILED released a VPS operation lock");
+ // A forged valid signature for a potentially partial write must also fail
+ // the Gateway's strict no-write result-code allowlist.
+ const signedAmbiguous=await rootTerminal(invalid,"PASSWORD_DISABLE_MANUAL_REVIEW",
+  {code:"PASSWORD_DISABLE_MANUAL_REVIEW"},{failed:true,noWrite:true});
+ expectCode(await send("/agent/v1/report",signedAmbiguous,device),403,"ROOT_MANUAL_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
+  "DISPATCHED","signed ambiguous result released a VPS lock");
+ // The local-only fixture never touched SSH. A signed prewrite failure can
+ // safely close the synthetic operation, with the same Root proof key.
+ const trustedNoWrite=await rootTerminal(invalid,"MANUAL_NODE_CONFIRMATION_REQUIRED",
+  {code:"MANUAL_NODE_CONFIRMATION_REQUIRED"},{failed:true,noWrite:true});
+ const terminated=await send("/agent/v1/report",trustedNoWrite,device);
+ assert.equal(terminated.status,200,JSON.stringify(terminated.json));
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(special.badRestore))[0].status,
+  "FAILED","trusted Root prewrite failure should release the fixture");
+ const duplicate=await send("/agent/v1/report",trustedNoWrite,device);
+ assert.equal(duplicate.status,200,JSON.stringify(duplicate.json));
+ assert.equal(duplicate.json.idempotent,true);
  const restore=addManual(special.restore,"ssh.password.restore",changedRev,
   {snapshot_ref:snapshot});
  const restoreReport=await rootTerminal(restore,"PASSWORD_POLICY_RESTORED",{
@@ -349,6 +490,45 @@ async function main(){
   await rootTerminal(revoke,"RESCUE_KEY_REVOKED",revokeResult),device);
  assert.equal(revoked.status,200,JSON.stringify(revoked.json));
  assert.equal(query("SELECT state FROM node_keys WHERE public_key_id="+q(special.rescueKey))[0].state,"revoked");
+ // The daily public-key install cannot rely on Agent-supplied file_checked.
+ // A compromised Agent must not turn a forged success or false FAILED into
+ // a terminal result and unlock subsequent privileged node operations.
+ const dailyFailure=addManual("c0000000-0000-4000-8000-000000000001",
+  "ssh.daily.install",restoredRev,{key_id:id.key,fingerprint});
+ expectCode(await send("/agent/v1/report",{
+  operation_id:dailyFailure.id,status:"FAILED",result_code:"DAILY_INSTALL_DISABLED",
+  detail:{result:{code:"DAILY_INSTALL_DISABLED"}}
+ },device),403,"ROOT_DAILY_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailyFailure.id))[0].status,
+  "DISPATCHED","unsigned daily install failure released node operation lock");
+ const dailyAmbiguous=await rootTerminal(dailyFailure,
+  "KEY_INSTALL_FAILED_MANUAL_REVIEW",{code:"KEY_INSTALL_FAILED_MANUAL_REVIEW"},
+  {failed:true,noWrite:true});
+ expectCode(await send("/agent/v1/report",dailyAmbiguous,device),403,"ROOT_DAILY_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailyFailure.id))[0].status,
+  "DISPATCHED","ambiguous public key write released node operation lock");
+ const dailySafeFailure=await rootTerminal(dailyFailure,"DAILY_INSTALL_DISABLED",
+  {code:"DAILY_INSTALL_DISABLED"},{failed:true,noWrite:true});
+ assert.equal((await send("/agent/v1/report",dailySafeFailure,device)).status,200);
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailyFailure.id))[0].status,
+  "FAILED","trusted prewrite daily failure not finalized");
+ const dailySuccess=addManual("c0000000-0000-4000-8000-000000000002",
+  "ssh.daily.install",restoredRev,{key_id:id.key,fingerprint});
+ const dailyData={key_fingerprint:fingerprint,file_checked:true,already_present:false};
+ expectCode(await send("/agent/v1/report",{
+  operation_id:dailySuccess.id,status:"SUCCEEDED",
+  result_code:"DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",detail:dailyData
+ },device),403,"ROOT_DAILY_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailySuccess.id))[0].status,
+  "DISPATCHED","untrusted Agent daily success changed node state");
+ const signedDaily=await rootTerminal(dailySuccess,
+  "DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",dailyData);
+ assert.equal((await send("/agent/v1/report",signedDaily,device)).status,200);
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailySuccess.id))[0].status,
+  "SUCCEEDED","verified daily install receipt not committed");
+ const dailyRetry=await send("/agent/v1/report",signedDaily,device);
+ assert.equal(dailyRetry.status,200);
+ assert.equal(dailyRetry.json.idempotent,true);
  console.log("PASS local workerd+D1 P4/P5: signed manual receipt required, "+
   "atomic password restore, snapshot guard, single-node rescue enable/revoke");
  console.log("PASS local workerd+D1: device signature, nonce replay, Root Ed25519 "+

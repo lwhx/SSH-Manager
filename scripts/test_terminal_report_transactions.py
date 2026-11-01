@@ -271,7 +271,9 @@ class TerminalReportTransactionTests(unittest.TestCase):
         body = handler.split('if(p==="/agent/v1/ws"){', 1)[0]
         self.assertIn("const outcome=await env.DB.batch(steps);", body)
         self.assertIn("const committed=", body)
-        self.assertIn("TERMINAL_REPORT_AUDIT_MISSING", body)
+        self.assertIn("TERMINAL_REPORT_TRANSACTION_INCOMPLETE", body)
+        self.assertIn("INSERT INTO manual_ssh_assertions(value) SELECT 0 WHERE changes()!=1", body)
+        self.assertIn("requireChanged(", body)
 
 
 if __name__ == "__main__":

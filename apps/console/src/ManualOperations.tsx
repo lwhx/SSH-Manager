@@ -1,10 +1,18 @@
 import React,{useEffect,useState} from "react";
+import {presentConsoleError} from "./errorPresentation";
+import {isNodeOnline} from "./nodeDisplay";
 
-type Node={id:string;name:string;status:string;init_stage:string;login_user:string};
+type Node={id:string;name:string;status:string;init_stage:string;login_user:string;last_seen_at?:number|null};
 type Snapshot={id:string;local_ref:string;revision:string;restored_at:number|null;created_at:number};
 type Rescue={active:boolean;installed:{fingerprint:string;version:number}|null};
 type ManualAction="ssh/password/disable"|"ssh/password/restore"|"ssh/config/rollback"|"rescue/enable"|"rescue/revoke";
 type Props={node:Node;owner:boolean;enabled:boolean;rescueKeyAvailable:boolean;onOperation:(id:string)=>void};
+export function canStartManualOperation(
+ node:Node,owner:boolean,enabled:boolean,nodeIdInput:string,reason:string,now=Date.now()/1000
+):boolean {
+ return owner&&enabled&&isNodeOnline(node,now)&&nodeIdInput===node.id&&
+  reason.trim()===reason&&reason.length>=12&&reason.length<=280;
+}
 const titles:Record<ManualAction,string>={
  "ssh/password/disable":"人工关闭 SSH 密码认证",
  "ssh/password/restore":"人工恢复原有密码认证策略",
@@ -17,7 +25,7 @@ async function request<T>(url:string,method="GET",payload?:unknown):Promise<T>{
   headers:{"Content-Type":"application/json",...(method!=="GET"?{"Idempotency-Key":crypto.randomUUID()}:{})},
   body:payload?JSON.stringify(payload):undefined});
  const data:any=await res.json();
- if(!res.ok)throw new Error(data.error||"REQUEST_FAILED");
+ if(!res.ok)throw new Error(presentConsoleError(data.error));
  return data;
 }
 
@@ -31,8 +39,7 @@ export default function ManualOperations({node,owner,enabled,rescueKeyAvailable,
  const [lastStatus,setLastStatus]=useState("");
  const [notice,setNotice]=useState("");
  const [busy,setBusy]=useState(false);
- const ready=owner&&enabled&&node.status==="online"&&nodeIdInput===node.id&&
-  reason.trim()===reason&&reason.length>=12&&reason.length<=280;
+ const ready=canStartManualOperation(node,owner,enabled,nodeIdInput,reason);
  async function refresh(){
   const [s,r]=await Promise.all([
    request<{snapshots:Snapshot[]}>("/nodes/"+node.id+"/snapshots"),

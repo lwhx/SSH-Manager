@@ -27,6 +27,16 @@ type rootRecovery struct{
  State string `json:"state"`
  Result LocalHelperResult `json:"result"`
 }
+// A terminal helper error with one of these codes may follow a partial SSH
+// write, failed reload, or missing Root signature. It must remain unresolved.
+func requiresManualReviewResult(code string)bool{
+ return strings.HasSuffix(code,"_MANUAL_REVIEW")||
+  strings.HasPrefix(code,"ROOT_MANUAL_")||
+  code=="RESCUE_KEY_OUTCOME_INVALID"||
+  // Existing Staging helpers may still emit these pre-fix codes after a
+  // partial authorized_keys write. They cannot prove no SSH side effect.
+  code=="KEY_INSTALL_FAILED"||code=="KEY_INSTALL_NOT_VERIFIED"
+}
 func rootRecoveryAction(action string)bool{
  switch action{
  case "ssh.policy.inspect","ssh.daily.install","ssh.verification.prepare",
@@ -206,6 +216,14 @@ func (a *Agent)recoverClaimedOperationsWithSocket(ctx context.Context,socket str
   }
   switch outcome.State{
   case "RECORDED":
+   if requiresManualReviewResult(outcome.Result.Code){
+    if err:=a.markManualReview(id,"UNCONFIRMED");err!=nil{
+     log.Printf("cannot record manual review for Root operation %s: %v",id,err)
+    }else{
+     log.Printf("Root operation %s has a durable manual-review result; cloud outcome remains unknown",id)
+    }
+    continue
+   }
    status:="FAILED"
    if outcome.Result.OK{status="SUCCEEDED"}
    if err:=a.enqueueOperationReport(id,status,outcome.Result.Code,outcome.Result.Detail);err!=nil{
@@ -237,6 +255,14 @@ func (a *Agent)recoverSingleRootOperation(ctx context.Context,id,action string){
  }
  if out.State!="RECORDED"{
   log.Printf("Root operation %s outcome %s: will not assume failure or retry SSH write",id,out.State)
+  return
+ }
+ if requiresManualReviewResult(out.Result.Code){
+  if err:=a.markManualReview(id,"UNCONFIRMED");err!=nil{
+   log.Printf("cannot record manual review for Root operation %s: %v",id,err)
+  }else{
+   log.Printf("Root operation %s result requires manual investigation; no terminal cloud report sent",id)
+  }
   return
  }
  status:="FAILED"

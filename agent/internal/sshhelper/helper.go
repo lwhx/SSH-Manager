@@ -166,13 +166,31 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)(out Result){
  // the reservation remains UNCONFIRMED and requires human investigation.
  // Never return an unpersisted SUCCESS across the root/Agent boundary.
  defer func(){
+  // Daily key installation also needs independent Root evidence. Preserve
+  // the fully signed terminal result in the root-only journal before the
+  // unprivileged Agent receives it. Ambiguous writes cannot be signed away.
+  if cmd.Action=="ssh.daily.install"&&(out.OK||dailyNoWriteFailure(out.Code)){
+   out=h.signManualReceipt(cmd,out)
+  }
   if err:=h.Journal.Finalize(cmd.ID,cmd.NodeID,cmd.Action,out);err!=nil{
    out=Result{Code:"ROOT_RESULT_NOT_DURABLE_MANUAL_REVIEW"}
   }
  }()
+ // Fail before any authorized_keys access when proof cannot be generated.
+ if cmd.Action=="ssh.daily.install"&&len(h.ProofSigningKey)!=ed25519.PrivateKeySize{
+  return fail("ROOT_RECEIPT_KEY_UNAVAILABLE",nil)
+ }
  p,err:=h.Inspect(ctx,h.Config)
- if err!=nil{return fail("SSHD_INSPECTION_FAILED",err)}
- if err=p.DailyKeyEligibility(h.Config.AllowedUser);err!=nil{return fail("UNSUPPORTED_SSH_POLICY",err)}
+ if err!=nil{
+  result:=fail("SSHD_INSPECTION_FAILED",err)
+  if isManualSSHAction(cmd.Action){return h.signManualReceipt(cmd,result)}
+  return result
+ }
+ if err=p.DailyKeyEligibility(h.Config.AllowedUser);err!=nil{
+  result:=fail("UNSUPPORTED_SSH_POLICY",err)
+  if isManualSSHAction(cmd.Action){return h.signManualReceipt(cmd,result)}
+  return result
+ }
  if cmd.Action=="ssh.policy.inspect"{
   return Result{OK:true,Code:"POLICY_INSPECTED",Detail:map[string]any{
    "revision":p.Revision,"login_user":h.Config.AllowedUser,
@@ -184,12 +202,14 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)(out Result){
   }}
  }
  if isManualSSHAction(cmd.Action){
-  if cmd.ExpectedRevision=="unverified"||cmd.ExpectedRevision!=p.Revision{return fail("POLICY_REVISION_MISMATCH",nil)}
+  if cmd.ExpectedRevision=="unverified"||cmd.ExpectedRevision!=p.Revision{
+   return h.signManualReceipt(cmd,fail("POLICY_REVISION_MISMATCH",nil))
+  }
   // Never modify SSH unless Root can produce an independently verifiable
   // signed terminal receipt. The unprivileged Agent cannot forge that key.
   if len(h.ProofSigningKey)!=ed25519.PrivateKeySize{return fail("ROOT_RECEIPT_KEY_UNAVAILABLE",nil)}
   local:=h.executeManualSSH(ctx,cmd,p)
-  if !local.OK{return local}
+  if !local.OK&&!manualNoWriteFailure(local.Code){return local}
   return h.signManualReceipt(cmd,local)
  }
  if cmd.Action=="ssh.verification.prepare"{
@@ -236,8 +256,8 @@ func (h *Handler) Execute(ctx context.Context,s SignedCommand)(out Result){
   return fail("TARGET_USER_MISMATCH",nil)
  }
  result,err:=h.Install(account.HomeDir,uid,gid,payload.PublicKey,h.Config.SnapshotRoot)
- if err!=nil{return fail("KEY_INSTALL_FAILED",err)}
- if !result.FileChecked||result.Fingerprint!=fingerprint{return fail("KEY_INSTALL_NOT_VERIFIED",nil)}
+ if err!=nil{return fail("KEY_INSTALL_FAILED_MANUAL_REVIEW",err)}
+ if !result.FileChecked||result.Fingerprint!=fingerprint{return fail("KEY_INSTALL_NOT_VERIFIED_MANUAL_REVIEW",nil)}
  return Result{OK:true,Code:"DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",Detail:result}
 }
 func SafeUser(name string)bool{return accountRE.MatchString(name)}

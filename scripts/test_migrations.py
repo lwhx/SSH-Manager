@@ -112,6 +112,45 @@ def run() -> None:
     )
     invalid_key = (*arguments[:-1], "wrong-daily-key")
     assert db.execute(verification_sql, invalid_key).rowcount == 0, "inactive daily key accepted"
+    # Every node must have at most one unresolved signed operation even when
+    # two operators race between the initial SELECT and D1 INSERT.
+    insert_operation = (
+        "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,"
+        "expected_revision,command_json,signature,status,created_at,expires_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+    )
+    operation_a = "40000000-0000-4000-8000-000000000001"
+    operation_b = "40000000-0000-4000-8000-000000000002"
+    operation_c = "40000000-0000-4000-8000-000000000003"
+    def values(operation_id: str, identifier: str, state: str, target: str = node):
+        return (operation_id, target, "node.preflight", user, identifier, revision,
+                "{}", "fixture-signature", state, 1, 300)
+    db.execute(insert_operation, values(operation_a, "unique-a", "CREATED"))
+    try:
+        db.execute(insert_operation, values(operation_b, "unique-b", "CREATED"))
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("concurrent unresolved operations for same VPS were accepted")
+    db.execute("UPDATE operations SET status='SUCCEEDED' WHERE id=?", (operation_a,))
+    db.execute(insert_operation, values(operation_b, "unique-b", "DISPATCHED"))
+    try:
+        db.execute(insert_operation, values(operation_c, "unique-c", "RUNNING"))
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("another operation bypassed a DISPATCHED command")
+    # One VPS does not lock all other VPSs.
+    secondary_node = "00000000-0000-4000-8000-000000000002"
+    db.execute(
+        "INSERT INTO nodes(id,name,ssh_host,login_user,created_at) VALUES (?,?,?,?,?)",
+        (secondary_node, "second", "127.0.0.2", "root", 1),
+    )
+    db.execute(insert_operation, values(operation_c, "unique-c", "CREATED", secondary_node))
+    db.execute("UPDATE operations SET status='FAILED' WHERE id=?", (operation_b,))
+    db.execute(insert_operation, values("40000000-0000-4000-8000-000000000004", "unique-d", "CREATED"))
+    print("PASS: single unresolved operation per VPS, with independent nodes")
+
     print("PASS: migrations, guarded root proof, expired challenge and replay rejection")
 
 

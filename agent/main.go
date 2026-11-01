@@ -99,6 +99,22 @@ func report(a *Agent,ctx context.Context,id,status,code string,detail any){
  }
  a.drainOperationReports(ctx)
 }
+func (a *Agent) handleHelperResult(ctx context.Context,c Command,result LocalHelperResult){
+ if requiresManualReviewResult(result.Code){
+  // Root may have changed SSH before its durable result journal failed.
+  // Query the root-only journal; never convert this ambiguity into FAILED.
+  // An unresolved result must keep the cloud single-flight lock in place.
+  log.Printf("Root operation %s has no durable terminal result; manual review may be required",c.ID)
+  a.recoverSingleRootOperation(ctx,c.ID,c.Action)
+  return
+ }
+ if !result.OK{
+  report(a,ctx,c.ID,"FAILED",result.Code,result.Detail)
+  return
+ }
+ report(a,ctx,c.ID,"SUCCEEDED",result.Code,result.Detail)
+}
+
 func (a *Agent) handle(ctx context.Context,s SignedCommand){
  c,err:=a.verify(s);if err!=nil{log.Printf("rejected command: %v",err);return}
  if err:=a.claimOperation(c);err!=nil{
@@ -117,11 +133,7 @@ func (a *Agent) handle(ctx context.Context,s SignedCommand){
    a.recoverSingleRootOperation(ctx,c.ID,c.Action)
    break
   }
-  if !result.OK{
-   report(a,ctx,c.ID,"FAILED",result.Code,result.Detail)
-   break
-  }
-  report(a,ctx,c.ID,"SUCCEEDED",result.Code,result.Detail)
+  a.handleHelperResult(ctx,c,result)
  case "node.preflight":
   report(a,ctx,c.ID,"SUCCEEDED","READ_ONLY_DIAGNOSTIC",readOnlyPreflight())
  case "node.status":

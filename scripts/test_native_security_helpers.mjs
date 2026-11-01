@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
- DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery} from "./native_security_helpers.mjs";
+ DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery,
+ UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight,
+ buildUnresolvedOperationPreflightArgs,buildD1ReadOnlyQueryArgs} from "./native_security_helpers.mjs";
 const columns=["nodes","operations","paired_agents","pairing_tokens","device_nonces","node_keys","verifications","snapshots"];
 const empty=()=>[{success:true,results:[Object.fromEntries(columns.map(k=>[k,0]))]}];
 test("empty D1 identity tables permit one-time signer recovery only with complete verification",()=>{
@@ -59,4 +62,53 @@ test("deleted Worker recovery retains unpaired nodes but blocks all active or hi
  assert.throws(()=>validateDeletedWorkerStagingQuery([{success:false,results:[]}]));
  const negative=good();negative[0].results[0].total_nodes=-1;
  assert.throws(()=>validateDeletedWorkerStagingQuery(negative));
+});
+
+
+test("existing Staging D1 requires a read-only single-flight check before migration",()=>{
+ assert.match(UNRESOLVED_OPERATION_PREFLIGHT_SQL,/FROM operations/);
+ assert.match(UNRESOLVED_OPERATION_PREFLIGHT_SQL,/HAVING COUNT\(\*\)\s*>\s*1/);
+ assert.match(UNRESOLVED_OPERATION_PREFLIGHT_SQL,/status IN \('CREATED','DISPATCHED','RUNNING'\)/);
+ assert.doesNotMatch(UNRESOLVED_OPERATION_PREFLIGHT_SQL,/\b(?:DELETE|UPDATE|INSERT|ALTER|DROP|REPLACE|PRAGMA)\b/i);
+ assert.equal(validateUnresolvedOperationPreflight([{success:true,results:[]}]),true);
+ for(const bad of [
+  [{success:false,results:[]}],
+  [{success:true,results:[{node_id:"test",unresolved_count:2}]}],
+  [{success:true,results:[{node_id:"test",unresolved_count:1}]}],
+  [{success:true,results:null}],
+  [{success:true}],
+  [],
+  [{success:true,results:[]},{success:true,results:[]}]
+ ]){
+  assert.throws(()=>validateUnresolvedOperationPreflight(bad),/Staging D1/i);
+ }
+ const script=readFileSync(new URL("./cloudflare_native_deploy.mjs",import.meta.url),"utf8");
+ const begin=script.indexOf("async function update("),end=script.indexOf("async function main(",begin);
+ assert(begin>=0&&end>begin,"Could not locate existing Worker update");
+ const updateRoutine=script.slice(begin,end);
+ const check=updateRoutine.indexOf("assertNoDuplicateUnresolvedOperations();");
+ const migrate=updateRoutine.indexOf("migrate();");
+ assert(check>=0&&migrate>check,"Staging migration must be preceded by read-only D1 operation preflight");
+});
+
+test("all read-only recovery gates target the actual Staging D1 database",()=>{
+ const config="/repo/wrangler.single.staging.native.jsonc";
+ const queries=[EMPTY_STAGING_SQL,DELETED_WORKER_RECOVERY_SQL,UNRESOLVED_OPERATION_PREFLIGHT_SQL];
+ for(const sql of queries){
+  assert.deepEqual(buildD1ReadOnlyQueryArgs("ssh-manager-staging",config,sql),[
+   "d1","execute","ssh-manager-staging","--remote","--json",
+   "--config",config,"--command",sql
+  ]);
+ }
+ assert.throws(()=>buildD1ReadOnlyQueryArgs("",config,EMPTY_STAGING_SQL),/database name/);
+ assert.throws(()=>buildD1ReadOnlyQueryArgs("ssh-manager-staging","",EMPTY_STAGING_SQL),/config path/);
+ assert.throws(()=>buildD1ReadOnlyQueryArgs("ssh-manager-staging",config," "),/SQL/);
+});
+
+test("Staging D1 preflight executes against the configured database name, not the binding label",()=>{
+ const config="/repo/wrangler.single.staging.native.jsonc";
+ assert.deepEqual(buildUnresolvedOperationPreflightArgs("ssh-manager-staging",config),[
+  "d1","execute","ssh-manager-staging","--remote","--json",
+  "--config",config,"--command",UNRESOLVED_OPERATION_PREFLIGHT_SQL
+ ]);
 });

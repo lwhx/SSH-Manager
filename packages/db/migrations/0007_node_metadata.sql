@@ -1,0 +1,3 @@
+ALTER TABLE nodes ADD COLUMN group_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_nodes_group ON nodes(group_name);

@@ -134,6 +134,33 @@ func TestUnconfirmedRootWriteNeverBecomesSucceededOrFailed(t *testing.T){
   t.Fatal("unconfirmed authorized_keys action produced a fake operation report")
  }
 }
+func TestDurableManualReviewRootResultRemainsUnknown(t *testing.T){
+ a:=newRecoveryAgent(t,"https://unused.example",&http.Client{})
+ cmd:=Command{
+  ID:"90000000-0000-4000-8000-000000000001",
+  NodeID:a.config.NodeID,Action:"ssh.password.disable",
+  IssuedAt:time.Now().Unix()-3,
+ }
+ if err:=a.claimOperation(cmd);err!=nil{t.Fatal(err)}
+ root:=&sshhelper.Journal{Directory:filepath.Join(t.TempDir(),"root-journal")}
+ if err:=root.Claim(cmd.ID,cmd.NodeID,cmd.Action);err!=nil{t.Fatal(err)}
+ if err:=root.Finalize(cmd.ID,cmd.NodeID,cmd.Action,sshhelper.Result{
+  OK:false,Code:"PASSWORD_DISABLE_MANUAL_REVIEW",
+ });err!=nil{t.Fatal(err)}
+ socket,stop:=serveOneRootJournalRecovery(t,root,cmd.NodeID)
+ a.recoverClaimedOperationsWithSocket(context.Background(),socket)
+ stop()
+ report:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+ if _,err:=os.Stat(report);!errors.Is(err,os.ErrNotExist){
+  t.Fatalf("durable manual-review outcome became a terminal FAILED report: %v",err)
+ }
+ review:=filepath.Join(a.config.StateDir,"operations",cmd.ID+".review")
+ content,err:=os.ReadFile(review)
+ if err!=nil||string(content)!="UNCONFIRMED\n"{
+  t.Fatalf("manual-review outcome was not preserved locally: %q %v",content,err)
+ }
+}
+
 func TestRecoveryRejectsDifferentNodeAndUntrustedReceipt(t *testing.T){
  a:=newRecoveryAgent(t,"https://unused.example",&http.Client{})
  other:=Command{
@@ -156,4 +183,59 @@ func TestRecoveryRejectsDifferentNodeAndUntrustedReceipt(t *testing.T){
  link:=filepath.Join(dir,evilID+".json")
  if err:=os.Symlink(filepath.Join(dir,other.ID+".json"),link);err!=nil{t.Fatal(err)}
  if _,err:=readClaimedOperation(link);err==nil{t.Fatal("accepted symlinked Agent receipt")}
+}
+
+func TestUndurableRootResultNeverBecomesTerminalFailure(t *testing.T){
+ a:=newRecoveryAgent(t,"https://127.0.0.1:1",&http.Client{Timeout:time.Second})
+ a.config.HelperSocket="/nonstandard/test-socket"
+ cmd:=Command{
+  ID:"70000000-0000-4000-8000-000000000001",
+  NodeID:a.config.NodeID,Action:"ssh.password.disable",
+  IssuedAt:time.Now().Unix(),
+ }
+ a.handleHelperResult(context.Background(),cmd,LocalHelperResult{
+  OK:false,Code:"ROOT_RESULT_NOT_DURABLE_MANUAL_REVIEW",
+ })
+ report:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+ if _,err:=os.Stat(report);!errors.Is(err,os.ErrNotExist){
+  t.Fatalf("non-durable Root journal response became a terminal Agent report: %v",err)
+ }
+}
+
+func TestLegacyDailyInstallErrorsNeverUnlockCloudOperation(t *testing.T){
+ for _,code:=range []string{"KEY_INSTALL_FAILED","KEY_INSTALL_NOT_VERIFIED"}{
+  t.Run(code,func(t *testing.T){
+   a:=newRecoveryAgent(t,"https://127.0.0.1:1",&http.Client{Timeout:time.Second})
+   a.config.HelperSocket="/nonstandard/test-socket"
+   cmd:=Command{
+    ID:"70000000-0000-4000-8000-000000000002",
+    NodeID:a.config.NodeID,Action:"ssh.daily.install",
+    IssuedAt:time.Now().Unix(),
+   }
+   a.handleHelperResult(context.Background(),cmd,LocalHelperResult{
+    OK:false,Code:code,
+   })
+   report:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+   if _,err:=os.Stat(report);!errors.Is(err,os.ErrNotExist){
+    t.Fatalf("legacy uncertain public-key write became terminal cloud failure: %v",err)
+   }
+  })
+ }
+}
+func TestDurableRootFailureStillBecomesTerminalFailure(t *testing.T){
+ a:=newRecoveryAgent(t,"https://127.0.0.1:1",&http.Client{Timeout:time.Second})
+ a.config.HelperSocket="/nonstandard/test-socket"
+ cmd:=Command{
+  ID:"80000000-0000-4000-8000-000000000001",
+  NodeID:a.config.NodeID,Action:"ssh.password.disable",
+  IssuedAt:time.Now().Unix(),
+ }
+ a.handleHelperResult(context.Background(),cmd,LocalHelperResult{
+  OK:false,Code:"MANUAL_NODE_CONFIRMATION_REQUIRED",
+ })
+ path:=filepath.Join(a.config.StateDir,"reports",cmd.ID+".json")
+ saved,_,err:=readOperationReport(path)
+ if err!=nil||saved.Status!="FAILED"||saved.ResultCode!="MANUAL_NODE_CONFIRMATION_REQUIRED"{
+  t.Fatalf("durable helper failure was not preserved: %+v %v",saved,err)
+ }
 }

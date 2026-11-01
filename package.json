@@ -33,5 +33,8 @@
     "vite": "^7.1.0",
     "wrangler": "^4.45.0",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "rollup": "4.66.0"
   }
 }
