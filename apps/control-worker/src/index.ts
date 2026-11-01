@@ -8,8 +8,9 @@ import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
 import {createNodeWithPairingToken} from "./nodeCreation";
+import {persistVerificationStart,cancelPendingVerification,projectVerificationReadStatus} from "./verificationLifecycle";
 import {findIdempotentOperation,recoverIdempotentInsertConflict} from "./operationIdempotency";
-import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
+import {verificationBlocker,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
 interface Env {
@@ -313,12 +314,11 @@ async function handle(req:Request,env:Env):Promise<Response>{
       });
       ensure(!blocker,blocker||"NOT_READY",409);
       const t=now();
-      await env.DB.prepare(
-        "UPDATE ssh_verifications SET status='EXPIRED' WHERE node_id=? AND status='PENDING' AND expires_at<=?"
-      ).bind(node.id,t).run();
+      // A pending challenge is single-flight. Expired rows are transitioned
+      // within persistVerificationStart's audited D1 batch, never before it.
       const active=await env.DB.prepare(
-        "SELECT id FROM ssh_verifications WHERE node_id=? AND status='PENDING' LIMIT 1"
-      ).bind(node.id).first();
+        "SELECT id FROM ssh_verifications WHERE node_id=? AND status='PENDING' AND expires_at>? LIMIT 1"
+      ).bind(node.id,t).first();
       ensure(!active,"VERIFICATION_ALREADY_PENDING",409);
       const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
       const nonceHash=await sha256hex(token),id=crypto.randomUUID(),expires=t+VERIFICATION_TTL_SECONDS;
@@ -335,26 +335,27 @@ async function handle(req:Request,env:Env):Promise<Response>{
         }
       };
       const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
-      // These records commit together. A failed signed preparation cannot
-      // leave a PENDING verification without an operation to dispatch.
-      await withNodeOperationConflictGuard(()=>env.DB.batch([
-        env.DB.prepare(
-          "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,config_revision,nonce_hash,status,"+
-          "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)"
-        ).bind(id,node.id,key.fingerprint,node.login_user,node.config_revision,nonceHash,t,expires,key.id,a.id),
-        env.DB.prepare(
-          "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
-        ).bind(operationId,node.id,cmd.action,a.id,"verify-"+id,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45)
-      ]),
-        ()=>env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,now()).first<{status:string;expires_at:number}>(),now());
-      await audit(env,a,node.id,"ssh.verification.start","PENDING",null,id);
+      // Both the PENDING challenge and signed preparation operation must
+      // survive with their attribution audit, or none of them is created.
+      await withNodeOperationConflictGuard(
+        ()=>persistVerificationStart(env.DB,{
+          nodeId:node.id,verificationId:id,operationId,auditId:crypto.randomUUID(),
+          operatorId:a.id,keyId:key.id,keyFingerprint:key.fingerprint,
+          loginUser:node.login_user,configRevision:node.config_revision,
+          nonceHash,createdAt:t,expiresAt:expires,operationExpiresAt:t+45,
+          signedCommand:signed.command,signature:signed.signature
+        }),
+        ()=>env.DB.prepare(PENDING_NODE_OPERATION_SQL)
+          .bind(node.id,now()).first<{status:string;expires_at:number}>(),
+        now()
+      );
       await dispatchPreparedOperation(env,node.id,operationId,signed);
       // No endpoint currently trusts a browser-issued 'verified' claim.
       // The nonce is returned once and NEVER stored as plaintext in D1.
       return response({verification_id:id,token,expires_at:expires,login_user:node.login_user,
         fingerprint:key.fingerprint,status:"PENDING",preparation:"QUEUED",preparation_operation_id:operationId, trusted_proof_available:false},201);
     }
-    const verificationMatch=/^ssh-verification\/([0-9a-f-]{36})(?:\/cancel)?$/.exec(sub);
+    const verificationMatch=/^ssh-verification\\/([0-9a-f-]{36})(?:\\/cancel)?$/.exec(sub);
     if(verificationMatch){
       needRole(a,"admin");
       const verification=await env.DB.prepare(
@@ -362,34 +363,26 @@ async function handle(req:Request,env:Env):Promise<Response>{
         "FROM ssh_verifications WHERE id=? AND node_id=?"
       ).bind(verificationMatch[1],node.id).first<any>();
       ensure(verification,"VERIFICATION_NOT_FOUND",404);
-      if(verification.status==="PENDING"&&verification.expires_at<=now()){
-        await env.DB.prepare("UPDATE ssh_verifications SET status='EXPIRED' WHERE id=? AND status='PENDING'").bind(verification.id).run();
-        verification.status="EXPIRED";
-      }
       if(sub.endsWith("/cancel")&&req.method==="POST"){
-        ensure(verification.status==="PENDING","VERIFICATION_NOT_PENDING",409);
-        await env.DB.prepare(
-          "UPDATE ssh_verifications SET status='CANCELLED',invalidated_at=? WHERE id=? AND status='PENDING'"
-        ).bind(now(),verification.id).run();
-        await audit(env,a,node.id,"ssh.verification.cancel","CANCELLED",null,verification.id);
+        // The predicate inside the D1 batch decides, not this stale read:
+        // concurrent Root VERIFIED, expiry or prior cancellation -> HTTP 409.
+        await cancelPendingVerification(env.DB,{
+          nodeId:node.id,verificationId:verification.id,
+          actorId:a.id,auditId:crypto.randomUUID(),at:now()
+        });
         return response({verification_id:verification.id,status:"CANCELLED"});
       }
       if(req.method==="GET"){
+        // Status projection is read-only: a GET must not perform an
+        // unaudited expiry or invalidation, even if a proof is racing it.
         const activeKey=await env.DB.prepare(
           "SELECT id FROM public_keys WHERE purpose='daily' AND active=1"
         ).first<{id:string}>();
-        if(verification.status==="PENDING"&&
-           (verification.config_revision!==node.config_revision||
-            verification.public_key_id!==activeKey?.id)){
-          await env.DB.prepare(
-            "UPDATE ssh_verifications SET status='INVALIDATED',invalidated_at=? WHERE id=? AND status='PENDING'"
-          ).bind(now(),verification.id).run();
-          verification.status="INVALIDATED";
-        }
-        // Never send nonce_hash or any credentials back from a read endpoint.
-        return response({verification:{...verification,
-          status:verificationStatus(verification.status,verification.expires_at,now())},
-          trusted_proof_available:verification.status==="VERIFIED"});
+        const status=projectVerificationReadStatus(
+          verification,now(),node.config_revision,activeKey?.id
+        );
+        return response({verification:{...verification,status},
+          trusted_proof_available:status==="VERIFIED"});
       }
     }
     const manualActions:Record<string,
