@@ -31,6 +31,27 @@
 - 渗透/故障注入：错角色、跨节点、重放、过期签名、Root 回执篡改、网络断开、Cloudflare 5xx、Root journaling fsync 失败、D1 audit abort、配置 symlink、用户UID变更。
 - 最后由 Owner 人工批准具体节点可执行操作范围；不得一键对所有 VPS 启用密钥或救援。
 
+### Root 证明公钥历史审计一致性（只读）
+
+Owner 为单台 VPS 固定 Root Ed25519 公钥属于信任锚操作：`node_ssh_proof_keys` 的新增记录与 `ssh.proof-key.pin` 审计必须在**同一个 D1 batch** 提交。现有代码保证后续新增为原子写入，但较早版本的历史绑定可能已在审计异常时单独提交。
+
+在 **Staging D1** 上，发布前可只读执行：
+
+```sql
+SELECT p.node_id, p.approved_by, p.created_at
+FROM node_ssh_proof_keys AS p
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM audit_logs AS a
+  WHERE a.node_id = p.node_id
+    AND a.actor_id = p.approved_by
+    AND a.action = 'ssh.proof-key.pin'
+    AND a.result = 'ok'
+);
+```
+
+返回 0 行才表示这项基础关联检查没有发现缺失审计；**不代表公钥来源已经独立核实**。如果有记录，阻止该节点的密钥安装与高危 SSH 写操作，先由 Owner 从服务商控制台重新核对 Root 公钥和不可变审计来源。不得自动补写历史审计、替换已固定公钥、批量解除操作锁或据此认定结果成功。不要在诊断报告中打印公钥、私钥、令牌或其他凭证。
+
 ## 4. 发布方式
 
 先在手动 GitHub Actions 选择 staging build，把 SHA256SUMS 与源码 commit SHA 一起归档，管理员自行校验。
