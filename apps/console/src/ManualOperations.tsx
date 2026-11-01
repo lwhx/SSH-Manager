@@ -1,4 +1,5 @@
 import React,{useEffect,useState} from "react";
+import {presentConsoleError} from "./errorPresentation";
 
 type Node={id:string;name:string;status:string;init_stage:string;login_user:string};
 type Snapshot={id:string;local_ref:string;revision:string;restored_at:number|null;created_at:number};
@@ -17,7 +18,7 @@ async function request<T>(url:string,method="GET",payload?:unknown):Promise<T>{
   headers:{"Content-Type":"application/json",...(method!=="GET"?{"Idempotency-Key":crypto.randomUUID()}:{})},
   body:payload?JSON.stringify(payload):undefined});
  const data:any=await res.json();
- if(!res.ok)throw new Error(data.error||"REQUEST_FAILED");
+ if(!res.ok)throw new Error(presentConsoleError(data.error));
  return data;
 }
 

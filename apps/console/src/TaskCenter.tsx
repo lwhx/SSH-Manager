@@ -1,5 +1,6 @@
 import React,{useEffect,useMemo,useState} from "react";
 import {operationStatusPresentation} from "./operationPresentation";
+import {presentConsoleError} from "./errorPresentation";
 export interface TaskItem{
  id:string;node_id:string;action:string;status:string;result_code?:string|null;detail?:string|null;
  created_at:number;expires_at:number;finished_at?:number|null;
@@ -23,7 +24,7 @@ export default function TaskCenter({nodes,nodeId,onOpenNode}:Props){
     const suffix=nodeId?"?node_id="+encodeURIComponent(nodeId):"";
     const response=await fetch("/api/v1/operations"+suffix,{credentials:"same-origin",signal:controller.signal});
     const result=await response.json() as {operations?:TaskItem[];error?:string};
-    if(!response.ok)throw new Error(result.error||"TASK_LIST_FAILED");
+    if(!response.ok)throw new Error(presentConsoleError(result.error));
     if(alive){setRows(result.operations||[]);setError("");}
    }catch(e){if(alive&&!controller.signal.aborted)setError(e instanceof Error?e.message:String(e));}
    finally{loadingRequest=false;if(alive)setLoading(false);}

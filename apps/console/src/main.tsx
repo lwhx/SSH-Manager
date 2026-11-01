@@ -12,6 +12,7 @@ import NodeSecurityActions from "./NodeSecurityActions";
 import NodeOperationStatus,{type ScopedOperation} from "./NodeOperationStatus";
 import {parseConsoleRoute,consoleRouteHref,consoleNodeTabHref,parseNodeDetailTab,type ConsolePage,type NodeDetailTab} from "./nodeNavigation";
 import {isNodeOnline} from "./nodeDisplay";
+import {presentConsoleError} from "./errorPresentation";
 type NodeInfo={id:string;name:string;ssh_host:string;ssh_port:number;login_user:string;status:string;init_stage:string;last_seen_at?:number;config_revision:string;group_name?:string;notes?:string;created_at?:number;agent_version?:string;os_id?:string};
 type MeInfo={email:string;role:string;manual_ssh_actions_enabled:boolean;agent_gateway_url:string};
 type PairInfo={node_id:string;token:string;expires_at:number};
@@ -20,7 +21,7 @@ type VerificationInfo={node_id:string;id:string;status:string;expires_at:number;
 async function api<T>(path:string,method="GET",data?:unknown,headers?:Record<string,string>):Promise<T>{
  const res=await fetch("/api/v1"+path,{method,headers:{"Content-Type":"application/json",...headers},body:data?JSON.stringify(data):undefined,credentials:"same-origin"});
  const result:any=await res.json();
- if(!res.ok)throw new Error(result.error||"REQUEST_FAILED");return result;
+ if(!res.ok)throw new Error(presentConsoleError(result.error));return result;
 }
 function App(){
  const [me,setMe]=useState<MeInfo|null>(null);
