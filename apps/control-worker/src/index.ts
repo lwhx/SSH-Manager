@@ -3,6 +3,7 @@ import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
+import {findIdempotentOperation} from "./operationIdempotency";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
 
@@ -125,11 +126,11 @@ async function queueNodeOperation(
   req:Request, env:Env, a:Actor, node:any,
   action:"node.preflight"|"ssh.policy.inspect"|"ssh.daily.install"|"ssh.verification.prepare"|"ssh.password.disable"|"ssh.password.restore"|"ssh.config.rollback"|"ssh.rescue.enable"|"ssh.rescue.revoke", payload:Record<string,unknown>
 ):Promise<Response>{
-  ensure(isOnline(node),"NODE_OFFLINE",409);
   const idem=req.headers.get("Idempotency-Key");
   ensure(idem&&/^[a-zA-Z0-9_-]{12,100}$/.test(idem),"IDEMPOTENCY_KEY_REQUIRED");
-  const exists=await env.DB.prepare("SELECT id,status FROM operations WHERE operator_id=? AND idempotency_key=?").bind(a.id,idem).first<any>();
-  if(exists)return response({operation_id:exists.id,status:exists.status});
+  const existing=await findIdempotentOperation(env.DB,a.id,idem,{nodeId:node.id,action,payload},now());
+  if(existing)return response(existing);
+  ensure(isOnline(node),"NODE_OFFLINE",409);
   ensure(env.COMMAND_PRIVATE_KEY,"SIGNER_NOT_CONFIGURED",503);
   await assertNodeOperationSlotFree(env.DB,node.id,now());
   const id=crypto.randomUUID(),t=now();
