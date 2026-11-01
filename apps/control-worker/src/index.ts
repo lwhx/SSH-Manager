@@ -1,4 +1,5 @@
 import {rotateGlobalPublicKey} from "./globalKeyRotation";
+import {bootstrapFirstOwner,issueIdentityLinkToken,consumeIdentityLinkToken} from "./identityLinkStore";
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate,persistNodeSettingsUpdate} from "./nodeMetadata";
 import {requirePinnedRootForDailyInstall} from "./dailyKeyProofPolicy";
@@ -58,12 +59,26 @@ async function actor(req:Request,env:Env):Promise<Actor>{
   if(!identity&&email===env.BOOTSTRAP_OWNER_EMAIL.toLowerCase()){
     const existing=await env.DB.prepare("SELECT id FROM users WHERE email=? LIMIT 1").bind(email).first();
     if(!existing){
-      const id=crypto.randomUUID();
-      await env.DB.batch([
-        env.DB.prepare("INSERT INTO users(id,email,role,status,created_at) VALUES (?,?,'owner','active',?)").bind(id,email,now()),
-        env.DB.prepare("INSERT INTO user_identities(subject,user_id,provider,created_at) VALUES (?,?,?,?)").bind(subject,id,"cloudflare-access",now())
-      ]);
-      identity={id,email,role:"owner",status:"active"};
+      const id=crypto.randomUUID(),t=now();
+      try {
+        await bootstrapFirstOwner(env.DB,{
+          userId:id,email,subject,createdAt:t,auditId:crypto.randomUUID()
+        });
+        identity={id,email,role:"owner",status:"active"};
+      }catch(error){
+        // A concurrent request with the SAME verified Access subject can
+        // reuse its committed identity. Different subjects may never be
+        // silently linked by email, even when both claim the Owner email.
+        identity=await env.DB.prepare(
+          "SELECT u.id,u.email,u.role,u.status FROM user_identities i "+
+          "JOIN users u ON i.user_id=u.id WHERE i.subject=?"
+        ).bind(subject).first<{id:string;email:string;role:string;status:string}>();
+        if(!identity){
+          const taken=await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(email).first();
+          if(taken)throw new ApiError("FORBIDDEN",403);
+          throw error;
+        }
+      }
     }
   }
   ensure(identity?.status==="active","FORBIDDEN",403);
@@ -81,18 +96,12 @@ async function claimIdentity(req:Request,env:Env):Promise<Response>{
   ensure(row&&row.status==="active"&&row.email.toLowerCase()===identity.email,"INVALID_LINK_TOKEN",403);
   const bound=await env.DB.prepare("SELECT user_id FROM user_identities WHERE subject=?").bind(identity.subject).first();
   ensure(!bound,"IDENTITY_ALREADY_LINKED",409);
-  // The insertion is conditional on an unused token; the following update
-  // consumes it in the SAME D1 transaction. Concurrent claims cannot both win.
-  const [added,consumed]=await env.DB.batch([
-    env.DB.prepare("INSERT OR IGNORE INTO user_identities(subject,user_id,provider,created_at) SELECT ?,?,'cloudflare-access',? WHERE EXISTS "+
-      "(SELECT 1 FROM identity_link_tokens WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?)")
-      .bind(identity.subject,row.user_id,t,row.id,tokenHash,t),
-    env.DB.prepare("UPDATE identity_link_tokens SET used_at=? WHERE id=? AND token_hash=? AND used_at IS NULL AND expires_at>?")
-      .bind(t,row.id,tokenHash,t)
-  ]);
-  ensure(added.meta.changes===1&&consumed.meta.changes===1,"INVALID_LINK_TOKEN",403);
-  await env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,NULL,'identity.link',NULL,'success',NULL,?)")
-    .bind(crypto.randomUUID(),row.user_id,t).run();
+  // The identity binding, one-time token consumption and Owner audit
+  // commit together. A conflicting subject never burns an unused token.
+  await consumeIdentityLinkToken(env.DB,{
+    subject:identity.subject,userId:row.user_id,email:identity.email,
+    tokenId:row.id,tokenHash,claimedAt:t,auditId:crypto.randomUUID()
+  });
   return response({linked:true});
 }
 function needRole(user:Actor,minimum:"viewer"|"admin"|"owner"){
@@ -171,9 +180,10 @@ async function handle(req:Request,env:Env):Promise<Response>{
     needRole(a,"owner");
     const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
     const digest=await sha256hex(token),t=now();
-    await env.DB.prepare("INSERT INTO identity_link_tokens(id,user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?,?)")
-      .bind(crypto.randomUUID(),a.id,digest,t+300,t).run();
-    await audit(env,a,null,"identity.link_token","created");
+    await issueIdentityLinkToken(env.DB,{
+      tokenId:crypto.randomUUID(),userId:a.id,tokenHash:digest,expiresAt:t+300,
+      createdAt:t,auditId:crypto.randomUUID()
+    });
     return response({token,expires_in:300});
   }
   if(p==="/api/v1/me"&&req.method==="GET")return response({
