@@ -1,5 +1,5 @@
 import {DurableObject} from "cloudflare:workers";
-import {isManualAction,verifyRootManualOutcome} from "../../../packages/protocol/src/manual";
+import {isManualAction,verifyRootManualOutcome,verifyRootManualNoWriteFailure} from "../../../packages/protocol/src/manual";
 import {proofChallengeReadiness,verifyPinnedSSHProof,verifyPinnedSSHSignature} from "../../../packages/protocol/src/proof";
 import {ApiError,errorResponse,response,now,sha256hex,decodeBase64url,validNodeId} from "../../../packages/protocol/src/index";
 interface Env {DB:D1Database;NODE_SESSIONS:DurableObjectNamespace;COMMAND_PUBLIC_KEY:string;}
@@ -251,7 +251,7 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
         current.key_fingerprint===c.payload.fingerprint&&
         current.public_key_id===c.payload.key_id,"VERIFICATION_PREPARATION_STALE",409);
     }
-    // Validate helper proof BEFORE setting a sensitive operation to SUCCEEDED.
+    // Require independent Root proof before either terminal manual SSH report.
     if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
       const c=JSON.parse(op.command_json);
       must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
@@ -259,7 +259,7 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
     }
     let manualResult:Record<string,unknown>|null=null;
     let signedManualCommand:any=null;
-    if(status==="SUCCEEDED"&&isManualAction(op.action)){
+    if((status==="SUCCEEDED"||status==="FAILED")&&isManualAction(op.action)){
       signedManualCommand=JSON.parse(op.command_json);
       must(signedManualCommand.id===opId&&signedManualCommand.node_id===id&&
         signedManualCommand.action===op.action&&
@@ -271,17 +271,25 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
       ).bind(id).first<{public_key:string}>();
       must(pinned,"ROOT_MANUAL_RECEIPT_KEY_NOT_PINNED",403);
       try{
-        manualResult=await verifyRootManualOutcome(b.detail,pinned.public_key,{
+        const expected={
           nodeId:id,operationId:opId,action:op.action,resultCode:reportedCode,
           expectedRevision:signedManualCommand.expected_revision,
           issuedAt:signedManualCommand.issued_at,expiresAt:signedManualCommand.expires_at
-        },signedManualCommand.payload);
+        };
+        if(status==="SUCCEEDED"){
+          manualResult=await verifyRootManualOutcome(b.detail,pinned.public_key,
+            expected,signedManualCommand.payload);
+        }else{
+          await verifyRootManualNoWriteFailure(b.detail,pinned.public_key,expected);
+        }
       }catch{throw new ApiError("ROOT_MANUAL_RECEIPT_INVALID",403);}
-      const node=await env.DB.prepare(
-        "SELECT config_revision,init_stage FROM nodes WHERE id=?"
-      ).bind(id).first<{config_revision:string;init_stage:string}>();
-      must(node&&node.config_revision===signedManualCommand.expected_revision,
-        "MANUAL_SSH_REVISION_CHANGED",409);
+      if(status==="SUCCEEDED"){
+        const node=await env.DB.prepare(
+          "SELECT config_revision,init_stage FROM nodes WHERE id=?"
+        ).bind(id).first<{config_revision:string;init_stage:string}>();
+        must(node&&node.config_revision===signedManualCommand.expected_revision,
+          "MANUAL_SSH_REVISION_CHANGED",409);
+      }
     }
     const t=now();
     if(status==="RUNNING"){

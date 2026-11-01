@@ -45,31 +45,56 @@ export function manualResultMatches(action:ManualAction,code:string,
   result.before_sha256!==result.after_sha256&&
   (action!=="ssh.rescue.enable"||result.already_present!==true);
 }
-// The Agent may relay a Root result but cannot create a valid Ed25519 signature.
-// Never accept a client-authenticated success without this independent receipt.
+// A no-write proof is valid ONLY for failures before SSH changes begin.
+// Keep in sync with agent/internal/sshhelper/manual_receipt.go.
+const noWriteFailureCodes=new Set([
+ "SSHD_INSPECTION_FAILED","UNSUPPORTED_SSH_POLICY","POLICY_REVISION_MISMATCH",
+ "MANUAL_ACTOR_REQUIRED","MANUAL_PAYLOAD_INVALID","MANUAL_NODE_CONFIRMATION_REQUIRED",
+ "PASSWORD_DISABLE_LOCAL_LOCKED","FRESH_VERIFIED_LOGIN_REQUIRED",
+ "MANUAL_RESTORE_LOCAL_LOCKED","RESCUE_LOCAL_LOCKED","RESCUE_KEY_SCOPE_MISMATCH",
+ "RESCUE_KEY_INVALID","RESCUE_LOGIN_USER_INVALID"
+]);
+// The Agent can relay but cannot mint the independently pinned Root proof.
+async function verifiedRootReceipt(detail:unknown,rootPublicKey:string,expected:RootManualExpected
+):Promise<{result:Record<string,unknown>;receipt:Record<string,unknown>}>{
+ if(!plain(detail)||!plain(detail.result)||!plain(detail.root_receipt))throw new Error("MISSING_SIGNED_ROOT_OUTCOME");
+ const signed=detail.root_receipt;
+ if(typeof signed.payload!=="string"||typeof signed.signature!=="string")throw new Error("INVALID_ROOT_RECEIPT");
+ await verifyPinnedSSHSignature(signed.payload,signed.signature,rootPublicKey);
+ let receipt:unknown;
+ try{receipt=JSON.parse(signed.payload);}catch{throw new Error("INVALID_ROOT_RECEIPT_PAYLOAD")}
+ if(!plain(receipt)||receipt.v!==1||!validNodeId(String(receipt.operation_id))||
+  receipt.node_id!==expected.nodeId||receipt.operation_id!==expected.operationId||
+  receipt.action!==expected.action||receipt.result_code!==expected.resultCode||
+  receipt.expected_revision!==expected.expectedRevision||!revision(receipt.detail_sha256)||
+  !Number.isInteger(receipt.executed_at)||Number(receipt.executed_at)<expected.issuedAt-10||
+  Number(receipt.executed_at)>expected.expiresAt){
+  throw new Error("ROOT_RECEIPT_CONTEXT_MISMATCH");
+ }
+ const computed=await sha256hex(JSON.stringify(detail.result));
+ if(computed!==receipt.detail_sha256)throw new Error("ROOT_RECEIPT_RESULT_TAMPERED");
+ return {result:detail.result,receipt};
+}
 export async function verifyRootManualOutcome(
  detail:unknown,rootPublicKey:string,expected:RootManualExpected,
  commandPayload:Record<string,unknown>
 ):Promise<Record<string,unknown>>{
- if(!plain(detail)||!plain(detail.result)||!plain(detail.root_receipt))throw new Error("MISSING_SIGNED_ROOT_OUTCOME");
- const receipt=detail.root_receipt;
- if(typeof receipt.payload!=="string"||typeof receipt.signature!=="string")throw new Error("INVALID_ROOT_RECEIPT");
- await verifyPinnedSSHSignature(receipt.payload,receipt.signature,rootPublicKey);
- let r:unknown;
- try{r=JSON.parse(receipt.payload);}catch{throw new Error("INVALID_ROOT_RECEIPT_PAYLOAD")}
- if(!plain(r)||r.v!==1||!validNodeId(String(r.operation_id))||
-  r.node_id!==expected.nodeId||r.operation_id!==expected.operationId||
-  r.action!==expected.action||r.result_code!==expected.resultCode||
-  r.expected_revision!==expected.expectedRevision||!revision(r.detail_sha256)||
-  !Number.isInteger(r.executed_at)||Number(r.executed_at)<expected.issuedAt-10||
-  Number(r.executed_at)>expected.expiresAt){
-  throw new Error("ROOT_RECEIPT_CONTEXT_MISMATCH");
- }
- const computed=await sha256hex(JSON.stringify(detail.result));
- if(computed!==r.detail_sha256)throw new Error("ROOT_RECEIPT_RESULT_TAMPERED");
- if(!manualResultMatches(expected.action,expected.resultCode,detail.result,commandPayload,
+ const {result,receipt}=await verifiedRootReceipt(detail,rootPublicKey,expected);
+ if(receipt.no_ssh_write===true||
+  !manualResultMatches(expected.action,expected.resultCode,result,commandPayload,
    expected.expectedRevision)){
   throw new Error("ROOT_RECEIPT_RESULT_INVALID");
  }
- return detail.result;
+ return result;
+}
+// A failed manual SSH operation may finish only when Root attests no write.
+export async function verifyRootManualNoWriteFailure(
+ detail:unknown,rootPublicKey:string,expected:RootManualExpected
+):Promise<Record<string,unknown>>{
+ const {result,receipt}=await verifiedRootReceipt(detail,rootPublicKey,expected);
+ if(receipt.no_ssh_write!==true||!noWriteFailureCodes.has(expected.resultCode)||
+  Object.keys(result).length!==1||result.code!==expected.resultCode){
+  throw new Error("ROOT_NO_WRITE_FAILURE_NOT_PROVEN");
+ }
+ return result;
 }
