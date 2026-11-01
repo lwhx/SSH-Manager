@@ -9,12 +9,13 @@ const pin={
  auditId:"30000000-0000-4000-8000-000000000001",
  createdAt:1800000000
 };
-type Statement={sql:string;args:unknown[]};
+type Statement={sql:string;args?:unknown[]};
 function fixture(changes:[number,number,number],failure?:Error){
  const batches:Statement[][]=[];
  let independentWrites=0;
  const db={
   prepare:(sql:string)=>({
+   sql,
    bind:(...args:unknown[])=>({
     sql,args,
     run:async()=>{independentWrites++;throw Error("Unexpected non-transactional write");}
