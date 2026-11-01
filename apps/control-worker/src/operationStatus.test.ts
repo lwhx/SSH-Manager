@@ -3,7 +3,8 @@ import {
   projectOperationStatus,
   blockingNodeOperationCode,
   PENDING_NODE_OPERATION_SQL,
-  withNodeOperationConflictGuard
+  withNodeOperationConflictGuard,
+  assertNodeOperationSlotFree
 } from "./operationStatus";
 
 const at=1_800_000_000;
@@ -82,5 +83,57 @@ describe("D1 single-operation uniqueness conflicts return a safe API status",()=
   );
   expect(result).toEqual({id:"new-operation"});
   expect(inspected).toBe(0);
+ });
+});
+
+
+describe("D1 operation slot admission for both queue and SSH verification",()=>{
+ const node="11111111-1111-4111-8111-111111111111";
+ const at=1_800_000_000;
+ function fixture(initial:{status:string;expires_at:number}|null){
+  let pending=initial?{...initial}:null;
+  const log:string[]=[];
+  const db={
+   prepare:(sql:string)=>({
+    bind:(...args:unknown[])=>({
+     run:async()=>{
+      log.push("expire");
+      expect(sql).toContain("SET status='EXPIRED'");
+      expect(sql).toContain("status='CREATED'");
+      expect(args).toEqual([node,at]);
+      if(pending?.status==="CREATED"&&pending.expires_at<=at)pending.status="EXPIRED";
+      return {meta:{changes:pending?.status==="EXPIRED"?1:0}};
+     },
+     first:async()=>{
+      log.push("lookup");
+      expect(sql).toBe(PENDING_NODE_OPERATION_SQL);
+      expect(args).toEqual([node,at]);
+      return pending&&(pending.status==="DISPATCHED"||pending.status==="RUNNING"||
+       (pending.status==="CREATED"&&pending.expires_at>at))?pending:null;
+     }
+    })
+   })
+  };
+  return {db:db as unknown as D1Database,log};
+ }
+ it("expires a stale unsent command before admitting a fresh verification preparation",async()=>{
+  const f=fixture({status:"CREATED",expires_at:at-1});
+  await expect(assertNodeOperationSlotFree(f.db,node,at)).resolves.toBeUndefined();
+  expect(f.log).toEqual(["expire","lookup"]);
+ });
+ it("does not expire a possibly executed command when its acknowledgement is unknown",async()=>{
+  for(const status of ["DISPATCHED","RUNNING"]){
+   const f=fixture({status,expires_at:at-1});
+   await expect(assertNodeOperationSlotFree(f.db,node,at)).rejects.toMatchObject({
+    code:"NODE_OPERATION_RESULT_UNKNOWN",httpStatus:409
+   });
+   expect(f.log).toEqual(["expire","lookup"]);
+  }
+ });
+ it("rejects another pending unsent operation",async()=>{
+  const f=fixture({status:"CREATED",expires_at:at+45});
+  await expect(assertNodeOperationSlotFree(f.db,node,at)).rejects.toMatchObject({
+   code:"NODE_OPERATION_IN_PROGRESS",httpStatus:409
+  });
  });
 });
