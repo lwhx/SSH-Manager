@@ -20,7 +20,7 @@ import {
 import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
  DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery,
  UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight,
- buildUnresolvedOperationPreflightArgs} from "./native_security_helpers.mjs";
+ buildUnresolvedOperationPreflightArgs,buildD1ReadOnlyQueryArgs} from "./native_security_helpers.mjs";
 
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const WRANGLER=join(ROOT,"node_modules","wrangler","bin","wrangler.js");
@@ -121,7 +121,7 @@ function buildAssets(){
   throw Error("Built React assets are missing");
 }
 function assertNoDuplicateUnresolvedOperations(){
- const raw=wrangler(buildUnresolvedOperationPreflightArgs(DB,CONFIG),{capture:true});
+ const raw=wrangler(buildD1ReadOnlyQueryArgs(DB,CONFIG,UNRESOLVED_OPERATION_PREFLIGHT_SQL),{capture:true});
  let parsed;
  try{parsed=JSON.parse(raw);}catch{
   throw Error("Staging D1 operation preflight failed: invalid Wrangler JSON response");
@@ -171,8 +171,7 @@ async function initialize(template,id){
 // A previous unpaired node may be retained; an activated Agent/SSH history
 // may never be silently rekeyed.
 function assertUnpairedStagingD1(){
- const output=wrangler(["d1","execute","DB","--remote","--json",
-  "--config",CONFIG,"--command",DELETED_WORKER_RECOVERY_SQL],{capture:true});
+ const output=wrangler(buildD1ReadOnlyQueryArgs(DB,CONFIG,DELETED_WORKER_RECOVERY_SQL),{capture:true});
  let payload;
  try{payload=JSON.parse(output);}catch{
   throw Error("Deleted-Worker recovery cannot parse D1 safety check");
@@ -224,8 +223,7 @@ async function repairOrphanedSigner(template,remote,dbs,id){
  if(deletedRecovery){
   assertUnpairedStagingD1();
  }else{
-  const query=wrangler(["d1","execute","DB","--remote","--json",
-   "--config",CONFIG,"--command",EMPTY_STAGING_SQL],{capture:true});
+  const query=wrangler(buildD1ReadOnlyQueryArgs(DB,CONFIG,EMPTY_STAGING_SQL),{capture:true});
   let data;
   try{data=JSON.parse(query);}catch{
    throw Error("Remote D1 recovery check returned invalid JSON; refusing signer reset");

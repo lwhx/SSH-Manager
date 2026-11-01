@@ -111,11 +111,16 @@ export function validateUnresolvedOperationPreflight(payload){
  return true;
 }
 
-export function buildUnresolvedOperationPreflightArgs(database,config){
+export function buildD1ReadOnlyQueryArgs(database,config,sql){
  if(typeof database!=="string"||!database.trim())
-  throw Error("Staging D1 operation preflight requires a database name");
+  throw Error("Staging D1 read-only query requires a database name");
  if(typeof config!=="string"||!config.trim())
-  throw Error("Staging D1 operation preflight requires a Wrangler config path");
+  throw Error("Staging D1 read-only query requires a Wrangler config path");
+ if(typeof sql!=="string"||!sql.trim())
+  throw Error("Staging D1 read-only query requires SQL");
  return ["d1","execute",database,"--remote","--json","--config",config,
-  "--command",UNRESOLVED_OPERATION_PREFLIGHT_SQL];
+  "--command",sql];
+}
+export function buildUnresolvedOperationPreflightArgs(database,config){
+ return buildD1ReadOnlyQueryArgs(database,config,UNRESOLVED_OPERATION_PREFLIGHT_SQL);
 }

@@ -4,7 +4,7 @@ import {readFileSync} from "node:fs";
 import {SIGNER_RECOVERY_FLAG,EMPTY_STAGING_SQL,validateEmptyStagingQuery,verifyWorkerTargets,
  DELETED_WORKER_RECOVERY_FLAG,DELETED_WORKER_RECOVERY_SQL,validateDeletedWorkerStagingQuery,
  UNRESOLVED_OPERATION_PREFLIGHT_SQL,validateUnresolvedOperationPreflight,
- buildUnresolvedOperationPreflightArgs} from "./native_security_helpers.mjs";
+ buildUnresolvedOperationPreflightArgs,buildD1ReadOnlyQueryArgs} from "./native_security_helpers.mjs";
 const columns=["nodes","operations","paired_agents","pairing_tokens","device_nonces","node_keys","verifications","snapshots"];
 const empty=()=>[{success:true,results:[Object.fromEntries(columns.map(k=>[k,0]))]}];
 test("empty D1 identity tables permit one-time signer recovery only with complete verification",()=>{
@@ -95,11 +95,14 @@ test("all read-only recovery gates target the actual Staging D1 database",()=>{
  const config="/repo/wrangler.single.staging.native.jsonc";
  const queries=[EMPTY_STAGING_SQL,DELETED_WORKER_RECOVERY_SQL,UNRESOLVED_OPERATION_PREFLIGHT_SQL];
  for(const sql of queries){
-  assert.deepEqual(buildUnresolvedOperationPreflightArgs("ssh-manager-staging",config,sql),[
+  assert.deepEqual(buildD1ReadOnlyQueryArgs("ssh-manager-staging",config,sql),[
    "d1","execute","ssh-manager-staging","--remote","--json",
    "--config",config,"--command",sql
   ]);
  }
+ assert.throws(()=>buildD1ReadOnlyQueryArgs("",config,EMPTY_STAGING_SQL),/database name/);
+ assert.throws(()=>buildD1ReadOnlyQueryArgs("ssh-manager-staging","",EMPTY_STAGING_SQL),/config path/);
+ assert.throws(()=>buildD1ReadOnlyQueryArgs("ssh-manager-staging",config," "),/SQL/);
 });
 
 test("Staging D1 preflight executes against the configured database name, not the binding label",()=>{
