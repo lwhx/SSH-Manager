@@ -1,5 +1,6 @@
 import {DurableObject} from "cloudflare:workers";
-import {isManualAction,verifyRootManualOutcome,verifyRootManualNoWriteFailure} from "../../../packages/protocol/src/manual";
+import {isManualAction,verifyRootManualOutcome,verifyRootManualNoWriteFailure,
+ verifyRootDailyInstallOutcome,verifyRootDailyNoWriteFailure} from "../../../packages/protocol/src/manual";
 import {proofChallengeReadiness,verifyPinnedSSHProof,verifyPinnedSSHSignature} from "../../../packages/protocol/src/proof";
 import {ApiError,errorResponse,response,now,sha256hex,decodeBase64url,validNodeId} from "../../../packages/protocol/src/index";
 interface Env {DB:D1Database;NODE_SESSIONS:DurableObjectNamespace;COMMAND_PUBLIC_KEY:string;}
@@ -252,10 +253,28 @@ async function authenticated(req:Request,env:Env):Promise<Response>{
         current.public_key_id===c.payload.key_id,"VERIFICATION_PREPARATION_STALE",409);
     }
     // Require independent Root proof before either terminal manual SSH report.
-    if(status==="SUCCEEDED"&&op.action==="ssh.daily.install"){
-      const c=JSON.parse(op.command_json);
-      must(b.detail&&plain(b.detail)&&b.detail.key_fingerprint===c.payload.fingerprint&&b.detail.file_checked===true,
-        "INSTALL_PROOF_MISSING",409);
+    if((status==="SUCCEEDED"||status==="FAILED")&&op.action==="ssh.daily.install"){
+      let c:any;
+      try{c=JSON.parse(op.command_json);}catch{throw new ApiError("DAILY_COMMAND_SCOPE_INVALID",409);}
+      must(c.id===opId&&c.node_id===id&&c.action===op.action&&
+        /^[a-f0-9]{64}$/.test(String(c.expected_revision||""))&&plain(c.payload),
+        "DAILY_COMMAND_SCOPE_INVALID",409);
+      const pinned=await env.DB.prepare(
+        "SELECT public_key FROM node_ssh_proof_keys WHERE node_id=?"
+      ).bind(id).first<{public_key:string}>();
+      must(pinned,"ROOT_DAILY_RECEIPT_KEY_NOT_PINNED",403);
+      const expected={
+        nodeId:id,operationId:opId,action:"ssh.daily.install" as const,
+        resultCode:reportedCode,expectedRevision:c.expected_revision,
+        issuedAt:c.issued_at,expiresAt:c.expires_at
+      };
+      try{
+        if(status==="SUCCEEDED"){
+          await verifyRootDailyInstallOutcome(b.detail,pinned.public_key,expected,c.payload);
+        }else{
+          await verifyRootDailyNoWriteFailure(b.detail,pinned.public_key,expected);
+        }
+      }catch{throw new ApiError("ROOT_DAILY_RECEIPT_INVALID",403);}
     }
     let manualResult:Record<string,unknown>|null=null;
     let signedManualCommand:any=null;

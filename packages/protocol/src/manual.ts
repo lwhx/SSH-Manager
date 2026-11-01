@@ -13,6 +13,9 @@ export interface RootManualExpected{
  nodeId:string; operationId:string; action:ManualAction; resultCode:string;
  expectedRevision:string; issuedAt:number; expiresAt:number;
 }
+export interface RootDailyExpected extends Omit<RootManualExpected,"action">{
+ action:"ssh.daily.install";
+}
 export interface ManualOutcome{
  result:Record<string,unknown>;
  root_receipt:{payload:string;signature:string};
@@ -55,7 +58,7 @@ const noWriteFailureCodes=new Set([
  "RESCUE_KEY_INVALID","RESCUE_LOGIN_USER_INVALID"
 ]);
 // The Agent can relay but cannot mint the independently pinned Root proof.
-async function verifiedRootReceipt(detail:unknown,rootPublicKey:string,expected:RootManualExpected
+async function verifiedRootReceipt(detail:unknown,rootPublicKey:string,expected:RootManualExpected|RootDailyExpected
 ):Promise<{result:Record<string,unknown>;receipt:Record<string,unknown>}>{
  if(!plain(detail)||!plain(detail.result)||!plain(detail.root_receipt))throw new Error("MISSING_SIGNED_ROOT_OUTCOME");
  const signed=detail.root_receipt;
@@ -95,6 +98,43 @@ export async function verifyRootManualNoWriteFailure(
  if(receipt.no_ssh_write!==true||!noWriteFailureCodes.has(expected.resultCode)||
   Object.keys(result).length!==1||result.code!==expected.resultCode){
   throw new Error("ROOT_NO_WRITE_FAILURE_NOT_PROVEN");
+ }
+ return result;
+}
+
+// Daily public-key installation also modifies authorized_keys. Agent-auth
+// alone must not be sufficient to claim that the key was successfully added.
+export async function verifyRootDailyInstallOutcome(
+ detail:unknown,rootPublicKey:string,expected:RootDailyExpected,
+ commandPayload:Record<string,unknown>
+):Promise<Record<string,unknown>>{
+ const {result,receipt}=await verifiedRootReceipt(detail,rootPublicKey,expected);
+ if(receipt.no_ssh_write===true||
+  expected.resultCode!=="DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF"||
+  result.file_checked!==true||result.key_fingerprint!==commandPayload.fingerprint||
+  !shaFP(result.key_fingerprint)||typeof result.already_present!=="boolean"){
+  throw new Error("ROOT_DAILY_INSTALL_PROOF_INVALID");
+ }
+ return result;
+}
+// Keep in sync with dailyNoWriteFailure() in the trusted Root Helper.
+// These errors are emitted BEFORE InstallDaily is invoked. Once it starts,
+// even an error cannot prove that authorized_keys was unchanged.
+const dailyNoWriteCodes=new Set([
+ "SSHD_INSPECTION_FAILED","UNSUPPORTED_SSH_POLICY",
+ "DAILY_INSTALL_DISABLED","POLICY_REVISION_MISMATCH",
+ "INVALID_KEY_PAYLOAD","USER_OR_KEY_SCOPE_MISMATCH",
+ "INVALID_DAILY_KEY","KEY_FINGERPRINT_MISMATCH",
+ "TARGET_USER_MISSING","INVALID_USER_ID","INVALID_GROUP_ID",
+ "TARGET_USER_MISMATCH"
+]);
+export async function verifyRootDailyNoWriteFailure(
+ detail:unknown,rootPublicKey:string,expected:RootDailyExpected
+):Promise<Record<string,unknown>>{
+ const {result,receipt}=await verifiedRootReceipt(detail,rootPublicKey,expected);
+ if(receipt.no_ssh_write!==true||!dailyNoWriteCodes.has(expected.resultCode)||
+  Object.keys(result).length!==1||result.code!==expected.resultCode){
+  throw new Error("ROOT_DAILY_NO_WRITE_NOT_PROVEN");
  }
  return result;
 }
