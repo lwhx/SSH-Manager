@@ -1,6 +1,6 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
 import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
-import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL} from "./operationStatus";
+import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
@@ -138,13 +138,14 @@ async function queueNodeOperation(
   const id=crypto.randomUUID(),t=now();
   const cmd={v:1 as const,id,node_id:node.id,action,actor:a.id,issued_at:t,expires_at:t+45,expected_revision:node.config_revision,payload};
   const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
-  await env.DB.batch([
+  await withNodeOperationConflictGuard(()=>env.DB.batch([
     env.DB.prepare("INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
       .bind(id,node.id,action,a.id,idem,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45),
     env.DB.prepare("INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) VALUES (?,?,?,?,?,'requested',?,?)")
       .bind(crypto.randomUUID(),a.id,node.id,action,id,
         typeof payload.reason==="string"?payload.reason.slice(0,280):null,t)
-  ]);
+  ]),
+    ()=>env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,now()).first<{status:string;expires_at:number}>(),now());
   await dispatchPreparedOperation(env,node.id,id,signed);
   return response({operation_id:id,status:"QUEUED"},202);
 }
@@ -315,7 +316,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
       const signed=await signCommand(cmd,env.COMMAND_PRIVATE_KEY);
       // These records commit together. A failed signed preparation cannot
       // leave a PENDING verification without an operation to dispatch.
-      await env.DB.batch([
+      await withNodeOperationConflictGuard(()=>env.DB.batch([
         env.DB.prepare(
           "INSERT INTO ssh_verifications(id,node_id,key_fingerprint,login_user,config_revision,nonce_hash,status,"+
           "created_at,expires_at,public_key_id,issued_by) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,?)"
@@ -323,7 +324,8 @@ async function handle(req:Request,env:Env):Promise<Response>{
         env.DB.prepare(
           "INSERT INTO operations(id,node_id,action,operator_id,idempotency_key,expected_revision,command_json,signature,status,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
         ).bind(operationId,node.id,cmd.action,a.id,"verify-"+id,node.config_revision,signed.command,signed.signature,"CREATED",t,t+45)
-      ]);
+      ]),
+        ()=>env.DB.prepare(PENDING_NODE_OPERATION_SQL).bind(node.id,now()).first<{status:string;expires_at:number}>(),now());
       await audit(env,a,node.id,"ssh.verification.start","PENDING",null,id);
       await dispatchPreparedOperation(env,node.id,operationId,signed);
       // No endpoint currently trusts a browser-issued 'verified' claim.
