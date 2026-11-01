@@ -3,6 +3,7 @@ import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
+import {createNodeWithPairingToken} from "./nodeCreation";
 import {findIdempotentOperation,recoverIdempotentInsertConflict} from "./operationIdempotency";
 import {verificationBlocker,verificationStatus,VERIFICATION_TTL_SECONDS} from "../../../packages/protocol/src/verification";
 import {ApiError,errorResponse,response,now,safeHost,safeUser,validNodeId,parsePublicKey,sha256hex,base64url,decodeBase64url,signCommand} from "../../../packages/protocol/src/index";
@@ -185,11 +186,15 @@ async function handle(req:Request,env:Env):Promise<Response>{
     const name=String(b.name||"").trim(),host=String(b.ssh_host||"").trim(),login=String(b.login_user||"").trim();
     const port=Number(b.ssh_port||22);
     ensure(name.length>=1&&name.length<=80&&safeHost(host)&&safeUser(login)&&Number.isInteger(port)&&port>0&&port<65536,"INVALID_NODE");
-    const id=crypto.randomUUID();
-    await env.DB.prepare("INSERT INTO nodes(id,name,ssh_host,ssh_port,login_user,created_at) VALUES (?,?,?,?,?,?)")
-      .bind(id,name,host,port,login,now()).run();
-    await audit(env,a,id,"node.create","ok");
-    return response({node_id:id,...await freshPairToken(env,a,id)},201);
+    const id=crypto.randomUUID(),t=now();
+    const token=base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const tokenHash=await sha256hex(token);
+    await createNodeWithPairingToken(env.DB,{
+      id,name,host,port,loginUser:login,createdAt:t,
+      tokenId:crypto.randomUUID(),tokenHash,tokenExpiresAt:t+600,
+      createdBy:a.id,auditId:crypto.randomUUID()
+    });
+    return response({node_id:id,token,expires_in:600},201);
   }
   const nodeMatch=/^\/api\/v1\/nodes\/([a-f0-9-]{36})(?:\/(.+))?$/.exec(p);
   if(nodeMatch){
