@@ -291,7 +291,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
     def test_staging_target_requires_exact_name_binding_uuid_and_routes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / preflight.CONFIG_NAME
+            path = root / preflight.CONFIG_NAMES[0]
             data = self.safe_config(path)
             with patch.object(preflight, "ROOT", root):
                 self.assertEqual(preflight.staging_config(path, UUID), path.resolve())
@@ -312,7 +312,12 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
                     path.write_text(json.dumps(changed), encoding="utf-8")
                     with self.assertRaises(ValueError):
                         preflight.staging_config(path, UUID)
-                outside = root.parent / preflight.CONFIG_NAME
+                native = root / preflight.CONFIG_NAMES[1]
+                self.safe_config(native)
+                self.assertEqual(preflight.staging_config(native, UUID), native.resolve())
+                outside_dir = root / "outside"
+                outside_dir.mkdir()
+                outside = outside_dir / preflight.CONFIG_NAMES[0]
                 self.safe_config(outside)
                 with self.assertRaises(ValueError):
                     preflight.staging_config(outside, UUID)
@@ -340,7 +345,7 @@ class StagingD1ReadOnlyPreflightTests(unittest.TestCase):
             binary = root / "node_modules" / "wrangler" / "bin" / "wrangler.js"
             binary.parent.mkdir(parents=True)
             binary.write_text("// dummy")
-            config = root / preflight.CONFIG_NAME
+            config = root / preflight.CONFIG_NAMES[0]
             self.safe_config(config)
             commands = []
             def fake_runner(argv, **kwargs):
