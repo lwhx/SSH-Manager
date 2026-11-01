@@ -430,6 +430,45 @@ async function main(){
   await rootTerminal(revoke,"RESCUE_KEY_REVOKED",revokeResult),device);
  assert.equal(revoked.status,200,JSON.stringify(revoked.json));
  assert.equal(query("SELECT state FROM node_keys WHERE public_key_id="+q(special.rescueKey))[0].state,"revoked");
+ // The daily public-key install cannot rely on Agent-supplied file_checked.
+ // A compromised Agent must not turn a forged success or false FAILED into
+ // a terminal result and unlock subsequent privileged node operations.
+ const dailyFailure=addManual("c0000000-0000-4000-8000-000000000001",
+  "ssh.daily.install",restoredRev,{key_id:id.key,fingerprint});
+ expectCode(await send("/agent/v1/report",{
+  operation_id:dailyFailure.id,status:"FAILED",result_code:"DAILY_INSTALL_DISABLED",
+  detail:{result:{code:"DAILY_INSTALL_DISABLED"}}
+ },device),403,"ROOT_DAILY_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailyFailure.id))[0].status,
+  "DISPATCHED","unsigned daily install failure released node operation lock");
+ const dailyAmbiguous=await rootTerminal(dailyFailure,
+  "KEY_INSTALL_FAILED_MANUAL_REVIEW",{code:"KEY_INSTALL_FAILED_MANUAL_REVIEW"},
+  {failed:true,noWrite:true});
+ expectCode(await send("/agent/v1/report",dailyAmbiguous,device),403,"ROOT_DAILY_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailyFailure.id))[0].status,
+  "DISPATCHED","ambiguous public key write released node operation lock");
+ const dailySafeFailure=await rootTerminal(dailyFailure,"DAILY_INSTALL_DISABLED",
+  {code:"DAILY_INSTALL_DISABLED"},{failed:true,noWrite:true});
+ assert.equal((await send("/agent/v1/report",dailySafeFailure,device)).status,200);
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailyFailure.id))[0].status,
+  "FAILED","trusted prewrite daily failure not finalized");
+ const dailySuccess=addManual("c0000000-0000-4000-8000-000000000002",
+  "ssh.daily.install",restoredRev,{key_id:id.key,fingerprint});
+ const dailyData={key_fingerprint:fingerprint,file_checked:true,already_present:false};
+ expectCode(await send("/agent/v1/report",{
+  operation_id:dailySuccess.id,status:"SUCCEEDED",
+  result_code:"DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",detail:dailyData
+ },device),403,"ROOT_DAILY_RECEIPT_INVALID");
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailySuccess.id))[0].status,
+  "DISPATCHED","untrusted Agent daily success changed node state");
+ const signedDaily=await rootTerminal(dailySuccess,
+  "DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",dailyData);
+ assert.equal((await send("/agent/v1/report",signedDaily,device)).status,200);
+ assert.equal(query("SELECT status FROM operations WHERE id="+q(dailySuccess.id))[0].status,
+  "SUCCEEDED","verified daily install receipt not committed");
+ const dailyRetry=await send("/agent/v1/report",signedDaily,device);
+ assert.equal(dailyRetry.status,200);
+ assert.equal(dailyRetry.json.idempotent,true);
  console.log("PASS local workerd+D1 P4/P5: signed manual receipt required, "+
   "atomic password restore, snapshot guard, single-node rescue enable/revoke");
  console.log("PASS local workerd+D1: device signature, nonce replay, Root Ed25519 "+

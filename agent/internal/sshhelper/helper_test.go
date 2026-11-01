@@ -82,6 +82,52 @@ func TestSignedDailyInstallAndReplay(t *testing.T){
  again:=h.Execute(context.Background(),s)
  if again.OK||*calls!=1{t.Fatal("replayed operation")}
 }
+func TestDailyInstallRequiresPinnedRootSignerBeforeWriting(t *testing.T){
+ signer,pub:=makeSigner(t)
+ h,calls:=newHandler(t,pub)
+ got:=h.Execute(context.Background(),signed(t,signer,validCommand(t)))
+ if got.OK||got.Code!="ROOT_RECEIPT_KEY_UNAVAILABLE"||*calls!=0{
+  t.Fatalf("daily install wrote SSH key without independent Root signer: %+v calls=%d",got,*calls)
+ }
+}
+func TestDailyInstallRootSignedResultAndPrewriteFailure(t *testing.T){
+ signer,pub:=makeSigner(t)
+ rootPub,rootPrivate,err:=ed25519.GenerateKey(rand.Reader)
+ if err!=nil{t.Fatal(err)}
+ for _,tc:=range []struct{name string;disabled bool;code string;noWrite bool}{
+  {"installed",false,"DAILY_KEY_WRITTEN_AWAITING_LOGIN_PROOF",false},
+  {"disabled-before-write",true,"DAILY_INSTALL_DISABLED",true},
+ }{
+  t.Run(tc.name,func(t *testing.T){
+   h,calls:=newHandler(t,pub)
+   h.ProofSigningKey=rootPrivate
+   if tc.disabled{h.Config.EnableDailyInstall=false}
+   cmd:=validCommand(t)
+   got:=h.Execute(context.Background(),signed(t,signer,cmd))
+   if got.Code!=tc.code||got.OK==tc.disabled{
+    t.Fatalf("unexpected daily install status: %+v",got)
+   }
+   if tc.disabled&&*calls!=0{t.Fatal("disabled install wrote a key")}
+   if !tc.disabled&&*calls!=1{t.Fatal("signed key install not executed exactly once")}
+   wrapper,ok:=got.Detail.(map[string]any)
+   if !ok{t.Fatalf("missing root-signed daily result: %+v",got)}
+   receipt,ok:=wrapper["root_receipt"].(SignedManualReceipt)
+   if !ok{t.Fatalf("missing Root receipt: %+v",wrapper)}
+   sig,err:=base64.RawURLEncoding.DecodeString(receipt.Signature)
+   if err!=nil||!ed25519.Verify(rootPub,[]byte(receipt.Payload),sig){
+    t.Fatalf("daily receipt not signed by Root: %v",err)
+   }
+   var claim ManualOperationReceipt
+   if err=json.Unmarshal([]byte(receipt.Payload),&claim);err!=nil{t.Fatal(err)}
+   if claim.NodeID!=cmd.NodeID||claim.OperationID!=cmd.ID||
+    claim.Action!=cmd.Action||claim.ExpectedRevision!=cmd.ExpectedRevision||
+    claim.ResultCode!=got.Code||claim.NoSSHWrite!=tc.noWrite{
+    t.Fatalf("daily receipt not bound to command and write state: %+v",claim)
+   }
+  })
+ }
+}
+
 func TestFailClosedPolicies(t *testing.T){
  key,pub:=makeSigner(t)
  cases:=[]struct{
