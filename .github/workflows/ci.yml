@@ -28,6 +28,7 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p test_verification_lifecycle.py
       - run: python3 -m unittest discover -s scripts -p test_verified_transition.py
       - run: python3 -m unittest discover -s scripts -p test_terminal_report_transactions.py
+      - run: python3 -m unittest discover -s scripts -p test_terminal_report_races.py
       - run: python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
       - run: sudo python3 -m unittest discover -s scripts -p test_staging_proof_preflight.py
       - run: python3 -m unittest discover -s scripts -p test_staging_readiness.py
