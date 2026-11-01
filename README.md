@@ -2,6 +2,10 @@
 
 基于 Cloudflare Workers、D1、Durable Objects 和 Linux Go Agent 的多 VPS SSH 密钥管理系统。
 
+> **最新开发文档**：[SSH Manager V4 · 完整开发文档](docs/DEVELOPMENT.md)（功能架构、接口、D1、Agent/Root Helper、权限、状态机、CI、后续开发规范和待验收项）。原 [管理台设计方案](docs/superpowers/specs/2026-11-01-vps-console-design.md) 仅作历史记录。
+>
+> **当前状态**：PR #8 已合并到 `main`，源代码自动化测试通过；远端 Staging D1、Cloudflare Access/RBAC 和可销毁 VPS 的 P3/P4/P5 真实安全联调仍未完成。**main 更新可能触发已绑定的 Cloudflare Builds 自动部署；代码合并或构建成功不代表生产 SSH 写操作获准。**
+
 **架构已调整为 1 个 Worker + 2 个自定义域名**。单 Worker 同时提供中文管理面板及 VPS Agent 通信，但二者通过精确 Host 隔离：
 
 | 入口 | 业务 | 安全验证 |

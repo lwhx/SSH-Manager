@@ -1,6 +1,6 @@
 # SSH Manager · Staging D1 只读安全预检
 
-> 适用于 PR #8 的**发布前只读数据完整性检查**。不是部署脚本、SSH 登录证明或生产安全放行。
+> 适用于已合并到 `main` 的 SSH Manager V4 的**Staging 发布前只读数据完整性检查**。不是部署脚本、SSH 登录证明或生产安全放行。
 
 ## 安全边界
 
@@ -64,4 +64,4 @@ Windows PowerShell 请使用单行命令，`python3` 可替换成实际安装的
 
 人工留存：审核者、被审核的完整 commit SHA、Cloudflare 账户/Worker/D1 UUID 独立核对结果、执行时间、退出码和**脱敏 JSON**。不要留存 Cloudflare Token、Access Cookie、私钥、配对 token、SSH challenge token、Root 签名 payload、完整 SSH 配置、原始 Wrangler stderr/stdout 或数据库导出。
 
-即使 D1 检查无异常，也不等于完成可信 Root 公钥来源确认、Cloudflare Access/RBAC 浏览器验收、隔离 VPS 新 SSH 连接、P3 T01–T11 及 P4/P5 人工恢复。上述独立安全 Review 和真实环境证据缺失时，PR 继续 Draft，不合并、不部署、不启用 `MANUAL_SSH_ACTIONS_ENABLED`。
+即使 D1 检查无异常，也不等于完成可信 Root 公钥来源确认、Cloudflare Access/RBAC 浏览器验收、隔离 VPS 新 SSH 连接、P3 T01–T11 及 P4/P5 人工恢复。上述独立安全 Review 和真实环境证据缺失时，即使代码已合并 `main`，也不得认定生产获批；远端 Staging 部署须单独审批，不能开启生产 SSH 高危写入或 `MANUAL_SSH_ACTIONS_ENABLED`。

@@ -1,11 +1,11 @@
 # SSH Manager — VPS 管理新版 Staging 验收清单
 
-> 本文针对 PR #8 的 Komari 风格管理台重构。**只在 Cloudflare Staging 和可销毁测试 VPS 上执行**。CI 全绿不等于界面或 SSH 实机验收通过。不要绕过原有 P3.4 T01–T11 安全关卡。
+> 本文针对 PR #8 已合并到 `main` 的 Komari 风格管理台重构。**只在 Cloudflare Staging 和可销毁测试 VPS 上执行**。CI 全绿不等于界面或 SSH 实机验收通过。不要绕过原有 P3.4 T01–T11 安全关卡。
 
 ## 0. 部署前隔离关卡（必须完成）
 
 - [ ] 使用已审核的 PR commit SHA，确认 GitHub CI 中 TypeScript、Vitest、D1 迁移、local workerd、Go Agent/Root Helper 测试全部成功。
-- [ ] PR **不得自动合并**。仅在 Owner 授权后才允许将审核过的 commit 部署到现有独立 Staging；不要创建新的 D1，也不要轮换签名密钥。
+- [ ] 功能代码虽已合并 `main`，但**真实 Staging 部署仍须 Owner 独立授权**；仅允许将审核过的 commit 部署到现有隔离 Staging，不能自动新建 D1 或轮换签名密钥。
 - [ ] 保留现有 Cloudflare Access：管理 hostname 只接受 GitHub/Cloudflare 身份，Agent hostname 保持设备 Ed25519 签名；不要对整个 Worker 强制浏览器 Access。
 - [ ] Staging 的 `MANUAL_SSH_ACTIONS_ENABLED=false`，VPS Helper 的写操作开关继续全部禁用；生产 VPS 不参加验收。
 - [ ] D1 迁移确认 `0007_node_metadata.sql` 已应用：`nodes.group_name`、`nodes.notes` 存在，原有节点、Agent 凭证和操作记录保留；运行脚本只迁移当前 Staging D1。
@@ -15,7 +15,7 @@
 - [ ] Owner 从 Cloudflare Dashboard **独立**确认当前账户、`ssh-manager-staging` Worker、已有 D1 绑定的 UUID 与仓库根目录的 `wrangler.single.staging.native.jsonc`（`cf:deploy`）或 `wrangler.single.staging.local.jsonc`（`deploy:single`）完全一致；确认 SSH 写开关 `MANUAL_SSH_ACTIONS_ENABLED=false`。绝不能自动创建新 D1 或改用生产绑定。
 - [ ] 在审核过的固定 Git SHA 上先运行 `scripts/staging_d1_readonly_preflight.py --staging-only` 检查 PLAN_ONLY；这是无网络预览，不算完成验收。
 - [ ] 经 Owner 明确授权后，只在现有 Staging D1 执行 [只读汇总预检](STAGING_D1_READONLY_PREFLIGHT.md)。保存脱敏报告、审核 SHA、时间、退出码；要求 0 FAIL，所有 WARN 必须人工确认，不得据此解锁任何未知 Agent 任务。
-- [ ] 同时核对历史 Root 绑定缺审计、VERIFIED 持久化证明和单节点操作锁。发现异常必须保持 Draft，不合并、不部署、不将记录强制标为 SUCCEEDED，也不执行 D1 更新来“修正”检查结果。
+- [ ] 同时核对历史 Root 绑定缺审计、VERIFIED 持久化证明和单节点操作锁。发现异常必须阻断后续远程部署和生产安全放行，不将记录强制标为 SUCCEEDED，也不执行 D1 更新来“修正”检查结果。
 - [ ] 独立安全审查人员需检查代码与回归测试，记录审查结论。D1 检查绿色不是 Access/RBAC、Root Helper、真实 SSH 登录及人工恢复验收的替代品。
 
 ## 1. 导航、列表和响应式

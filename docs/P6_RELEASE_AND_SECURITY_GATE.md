@@ -8,7 +8,7 @@
 - GitHub Actions 的常规 CI 必须通过：Go go test -race ./...、go vet、Root Helper 测试、TS check、Vitest、SQLite migrations、local workerd + D1、隔离 OpenSSH 回环新连接。
 - 手动 `workflow_dispatch` 的打包工作流仅生成 Linux amd64/arm64 二进制与 SHA256SUMS，不部署 VPS、Cloudflare 或自动发布生产版本。
 - 产物校验通过哈希和可信 GitHub Actions 运行来源，不将 SHA256SUMS 误称为数字签名。正式版本还需要组织批准的签名与可重复构建策略。
-- **依赖可复现性仍是发布阻断项**：当前仓库尚无 `package-lock.json`，CI 使用 `npm install` 会动态解析传递依赖。正式合并/发布前必须由受信任环境生成并审查 lockfile，将 CI 改为 `npm ci`，校验依赖完整性与 SBOM；`rollup` 临时版本覆盖不能代替完整 lockfile。
+- **依赖可复现性仍是发布阻断项**：当前仓库尚无 `package-lock.json`，CI 使用 `npm install` 会动态解析传递依赖。正式生产发布前必须由受信任环境生成并审查 lockfile，将 CI 改为 `npm ci`，校验依赖完整性与 SBOM；`rollup` 临时版本覆盖不能代替完整 lockfile。
 
 ## 2. 发行版兼容性矩阵
 
@@ -55,7 +55,7 @@ WHERE NOT EXISTS (
 
 ### Staging D1 数据完整性只读准入
 
-在批准任何部署、人工 SSH 安全写入或 PR 合并前，先由 Owner 和独立审查者完成 [Staging D1 只读预检](STAGING_D1_READONLY_PREFLIGHT.md)。先核对已固定的 Git SHA、Cloudflare 账户、现有 Worker 数据库绑定与 Staging D1 UUID，再根据明确授权运行 `scripts/staging_d1_readonly_preflight.py`。该工具默认只输出查询计划；只有显式 `--execute-remote` 才会使用项目安装的 Wrangler 发起**固定聚合 SELECT**。
+在批准任何新的远端部署、人工 SSH 安全写入或生产发布前，先由 Owner 和独立审查者完成 [Staging D1 只读预检](STAGING_D1_READONLY_PREFLIGHT.md)。先核对已固定的 Git SHA、Cloudflare 账户、现有 Worker 数据库绑定与 Staging D1 UUID，再根据明确授权运行 `scripts/staging_d1_readonly_preflight.py`。该工具默认只输出查询计划；只有显式 `--execute-remote` 才会使用项目安装的 Wrangler 发起**固定聚合 SELECT**。
 
 检查至少包含：Root 公钥绑定审计、跨 VPS Root 证明公钥复用、单 VPS 未结束操作锁（任何 DISPATCHED/RUNNING 均阻断，TTL 不解锁）、终态操作审计缺失/重复、VERIFIED 证明一致性、PENDING 旧配置或无效日常密钥、版本冲突、配对审计。所有异常只汇报数量，禁止自动补写审计、释放锁、更新密钥、修改 D1 或执行远端 SSH 操作。
 
@@ -65,7 +65,7 @@ WHERE NOT EXISTS (
 
 先在手动 GitHub Actions 选择 staging build，把 SHA256SUMS 与源码 commit SHA 一起归档，管理员自行校验。
 
-Cloudflare Staging 手动部署参考 docs/P3_STAGING_LIVE_RUNBOOK.md。独立 VPS 安装、手动操作及救援见 docs/P4_P5_MANUAL_OPERATIONS.md。即使所有自动化 CI 为绿色，也不将仓库自动合并 main，更不能自动部署生产节点。
+Cloudflare Staging 手动部署参考 docs/P3_STAGING_LIVE_RUNBOOK.md。独立 VPS 安装、手动操作及救援见 docs/P4_P5_MANUAL_OPERATIONS.md。目前 PR #8 功能代码已合并 `main`，但 **Git 合并不等于安全验收或生产部署批准**。即使自动化 CI 绿色，也不得直接部署生产节点或开启高危 SSH 写入；已绑定 Cloudflare Builds 的 main 自动部署触发器需单独核对。
 
 ## 5. 尚未通过的真实验收（不能省略）
 
