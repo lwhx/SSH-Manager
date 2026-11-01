@@ -1,7 +1,7 @@
 import {describe,expect,it} from "vitest";
 import {canStartManualOperation} from "./ManualOperations";
 const at=1_800_000_000;
-const node={id:"11111111-1111-4111-8111-111111111111",status:"online",last_seen_at:at-10};
+const node={id:"11111111-1111-4111-8111-111111111111",name:"Test VPS",status:"online",init_stage:"KEY_VERIFIED",login_user:"root",last_seen_at:at-10};
 const reason="已在本台 VPS 验证新密钥并确认控制台可用";
 describe("manual SSH controls require a fresh Agent heartbeat",()=>{
  it("allows an Owner only when this exact node is online and confirmation is complete",()=>{
