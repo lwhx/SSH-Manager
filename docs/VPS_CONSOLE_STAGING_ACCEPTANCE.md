@@ -10,6 +10,14 @@
 - [ ] Staging 的 `MANUAL_SSH_ACTIONS_ENABLED=false`，VPS Helper 的写操作开关继续全部禁用；生产 VPS 不参加验收。
 - [ ] D1 迁移确认 `0007_node_metadata.sql` 已应用：`nodes.group_name`、`nodes.notes` 存在，原有节点、Agent 凭证和操作记录保留；运行脚本只迁移当前 Staging D1。
 
+## 0.1 已部署 Staging D1 只读准入（禁止自动修复）
+
+- [ ] Owner 从 Cloudflare Dashboard **独立**确认当前账户、`ssh-manager-staging` Worker、已有 D1 绑定的 UUID 与本地生成的 `wrangler.single.staging.local.jsonc` 完全一致；确认 SSH 写开关 `MANUAL_SSH_ACTIONS_ENABLED=false`。绝不能自动创建新 D1 或改用生产绑定。
+- [ ] 在审核过的固定 Git SHA 上先运行 `scripts/staging_d1_readonly_preflight.py --staging-only` 检查 PLAN_ONLY；这是无网络预览，不算完成验收。
+- [ ] 经 Owner 明确授权后，只在现有 Staging D1 执行 [只读汇总预检](STAGING_D1_READONLY_PREFLIGHT.md)。保存脱敏报告、审核 SHA、时间、退出码；要求 0 FAIL，所有 WARN 必须人工确认，不得据此解锁任何未知 Agent 任务。
+- [ ] 同时核对历史 Root 绑定缺审计、VERIFIED 持久化证明和单节点操作锁。发现异常必须保持 Draft，不合并、不部署、不将记录强制标为 SUCCEEDED，也不执行 D1 更新来“修正”检查结果。
+- [ ] 独立安全审查人员需检查代码与回归测试，记录审查结论。D1 检查绿色不是 Access/RBAC、Root Helper、真实 SSH 登录及人工恢复验收的替代品。
+
 ## 1. 导航、列表和响应式
 
 - [ ] 登录后可分别打开仪表盘、VPS 节点、双公钥管理、任务中心、操作审计（仅 Owner）、系统设置。
