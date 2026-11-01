@@ -54,6 +54,15 @@ REQUIRED_COLUMNS = (
     ("node_ssh_proof_keys", "approved_by"),
     ("ssh_config_snapshots", "restored_at"),
 )
+REQUIRED_INDEX_DEFINITIONS = (
+    ("idx_key_active", "public_keys", "purpose", "active=1"),
+    ("idx_one_pending_verification_per_node", "ssh_verifications", "node_id", "status='PENDING'"),
+    ("idx_verification_unique_proof_id", "ssh_verifications", "proof_id", "proof_id IS NOT NULL"),
+    ("idx_one_unresolved_operation_per_node", "operations", "node_id",
+     "status IN ('CREATED','DISPATCHED','RUNNING')"),
+    ("idx_one_active_rescue_per_node", "node_keys", "node_id",
+     "purpose='rescue' AND state='installed'"),
+)
 
 def literals(values: tuple[str, ...]) -> str:
     """Only compile fixed, source-code-owned SQL identifier literals."""
@@ -70,6 +79,18 @@ SCHEMA_SQL = "SELECT " + ", ".join([
     "(SELECT COUNT(*) FROM pragma_table_info('" + table + "') WHERE name='" +
     column + "') AS col_" + table + "_" + column
     for table, column in REQUIRED_COLUMNS
+] + [
+    "(SELECT COUNT(*) FROM pragma_index_list('" + table + "') WHERE name='" +
+    index + "' AND \"unique\"=1 AND partial=1) AS unique_partial_" + index
+    for index, table, columns, predicate in REQUIRED_INDEX_DEFINITIONS
+] + [
+    "(SELECT group_concat(name, ',') FROM (SELECT name FROM pragma_index_info('" +
+    index + "') ORDER BY seqno)) AS index_columns_" + index
+    for index, table, columns, predicate in REQUIRED_INDEX_DEFINITIONS
+] + [
+    "(SELECT lower(sql) FROM sqlite_master WHERE type='index' AND name='" +
+    index + "') AS index_ddl_" + index
+    for index, table, columns, predicate in REQUIRED_INDEX_DEFINITIONS
 ])
 
 @dataclass(frozen=True)
@@ -156,11 +177,24 @@ def validate_schema(row: dict[str, Any]) -> bool:
         return False
     if type(row.get("index_count")) is not int or row["index_count"] != len(REQUIRED_INDEXES):
         return False
-    return all(
+    columns_ok = all(
         type(row.get("col_" + table + "_" + column)) is int
         and row["col_" + table + "_" + column] == 1
         for table, column in REQUIRED_COLUMNS
     )
+    if not columns_ok:
+        return False
+    for index, table, columns, predicate in REQUIRED_INDEX_DEFINITIONS:
+        unique_partial = row.get("unique_partial_" + index)
+        index_columns = row.get("index_columns_" + index)
+        ddl = row.get("index_ddl_" + index)
+        if unique_partial != 1 or index_columns != columns or not isinstance(ddl, str):
+            return False
+        normalized = re.sub(r"\\s+", " ", ddl.lower()).strip().rstrip(";")
+        expected = "on " + table + "(" + columns + ") where " + predicate.lower()
+        if expected not in normalized:
+            return False
+    return True
 
 def validate_count(value: Any) -> int:
     if type(value) is not int or value < 0:
