@@ -100,7 +100,7 @@ func report(a *Agent,ctx context.Context,id,status,code string,detail any){
  a.drainOperationReports(ctx)
 }
 func (a *Agent) handleHelperResult(ctx context.Context,c Command,result LocalHelperResult){
- if result.Code=="ROOT_RESULT_NOT_DURABLE_MANUAL_REVIEW"{
+ if requiresManualReviewResult(result.Code){
   // Root may have changed SSH before its durable result journal failed.
   // Query the root-only journal; never convert this ambiguity into FAILED.
   // An unresolved result must keep the cloud single-flight lock in place.
