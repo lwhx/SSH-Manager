@@ -1,5 +1,5 @@
 import {createRemoteJWKSet,jwtVerify} from "jose";
-import {parseNodeChanges,buildNodeSettingsUpdate} from "./nodeMetadata";
+import {parseNodeChanges,buildNodeSettingsUpdate,persistNodeSettingsUpdate} from "./nodeMetadata";
 import {projectOperationStatus,blockingNodeOperationCode,PENDING_NODE_OPERATION_SQL,withNodeOperationConflictGuard,assertNodeOperationSlotFree} from "./operationStatus";
 import {dispatchPreparedOperation} from "./operationDispatch";
 import {rotatePairingToken} from "./pairingTokenStore";
@@ -210,9 +210,9 @@ async function handle(req:Request,env:Env):Promise<Response>{
       try{changes=parseNodeChanges(await bodyJSON(req),current);}
       catch(e){throw new ApiError(e instanceof Error?e.message:"INVALID_NODE_SETTINGS",400);}
       const update=buildNodeSettingsUpdate(node.id,current,changes);
-      const outcome=await env.DB.prepare(update.sql).bind(...update.args).run();
-      ensure(outcome.meta.changes===1,"NODE_SETTINGS_CONFLICT",409);
-      await audit(env,a,node.id,"node.settings.update","ok");
+      await persistNodeSettingsUpdate(env.DB,update,{
+        auditId:crypto.randomUUID(),actorId:a.id,nodeId:node.id,createdAt:now()
+      });
       return response({node:{...node,...changes}});
     }
     if(sub==="pairing-token"&&req.method==="POST"){

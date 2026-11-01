@@ -1,4 +1,4 @@
-import {safeHost,safeUser} from "../../../packages/protocol/src/index";
+import {ApiError,safeHost,safeUser} from "../../../packages/protocol/src/index";
 export type NodeSettingsData={
  name:string;group_name:string;notes:string;ssh_host:string;ssh_port:number;login_user:string;status:string;
 };
@@ -44,4 +44,25 @@ export function buildNodeSettingsUpdate(
  ];
  if(connectionChanged)args.push(nodeId);
  return {sql,args};
+}
+
+export interface NodeSettingsAudit {
+ auditId:string;actorId:string;nodeId:string;createdAt:number;
+}
+/**
+ * Persist the optimistic node update and its audit event in one D1 transaction.
+ * If the audit insert fails, D1 rolls back the metadata update as well.
+ */
+export async function persistNodeSettingsUpdate(
+ db:D1Database,update:{sql:string;args:(string|number)[]},audit:NodeSettingsAudit
+):Promise<void>{
+ const [changed,logged]=await db.batch([
+  db.prepare(update.sql).bind(...update.args),
+  db.prepare(
+   "INSERT INTO audit_logs(id,actor_id,node_id,action,operation_id,result,reason,created_at) "+
+   "SELECT ?,?,?, 'node.settings.update',NULL,'ok',NULL,? WHERE changes()=1"
+  ).bind(audit.auditId,audit.actorId,audit.nodeId,audit.createdAt)
+ ]);
+ if(changed.meta.changes!==1)throw new ApiError("NODE_SETTINGS_CONFLICT",409);
+ if(logged.meta.changes!==1)throw new ApiError("NODE_SETTINGS_AUDIT_FAILED",500);
 }

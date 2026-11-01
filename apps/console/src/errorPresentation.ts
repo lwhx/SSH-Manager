@@ -11,6 +11,8 @@ const messages:Record<string,string>={
   "当前 VPS 已有任务执行中，请等待 Agent 的真实回执；不要重复提交相同操作（NODE_OPERATION_IN_PROGRESS）。",
  NODE_SETTINGS_CONFLICT:
   "节点资料已被其他管理员修改，或 Agent 正在配对，修改已被拒绝（HTTP 409）。请刷新节点资料后核对，再重新编辑（NODE_SETTINGS_CONFLICT）。",
+ NODE_SETTINGS_AUDIT_FAILED:
+  "节点资料更新未能写入审计记录，整笔事务已拒绝；请检查服务端日志后再核对节点资料（NODE_SETTINGS_AUDIT_FAILED）。",
  VERIFICATION_ALREADY_PENDING:
   "该 VPS 已有待完成的 SSH 验证挑战；请先完成或手动取消原挑战（VERIFICATION_ALREADY_PENDING）。",
  NODE_OFFLINE:
